@@ -675,6 +675,10 @@ impl Parser {
                     | NoteKind::AirSlide {
                         parent: note_parent,
                         ..
+                    }
+                    | NoteKind::AirCrush {
+                        parent: note_parent,
+                        ..
                     } if *note_parent == parent
             )
         })
