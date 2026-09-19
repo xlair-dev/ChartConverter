@@ -928,7 +928,9 @@ impl Parser {
             fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
             fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
         )?;
-        let is_continuation = fields.get(5).is_some_and(|value| *value == "ASC");
+        let is_continuation = fields
+            .get(5)
+            .is_some_and(|value| *value == "ASC" || *value == "ASD");
         let parent = (!is_continuation)
             .then(|| self.air_parent(line, fields.get(5)))
             .transpose()?;

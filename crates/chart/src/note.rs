@@ -77,6 +77,21 @@ mod tests {
     }
 
     #[test]
+    fn accepts_control_points_at_the_same_time_as_the_previous_point() {
+        let start = Position::new(0, 1).expect("valid position");
+        let end = Position::new(1, 1).expect("valid position");
+        let lane = Lane::slider(0, 4).expect("valid lane");
+        let points = vec![
+            SlidePoint::new(start, lane),
+            SlidePoint::new(start, Lane::slider(1, 2).expect("valid lane"))
+                .with_kind(super::SlidePointKind::Control),
+            SlidePoint::new(end, Lane::slider(4, 4).expect("valid lane")),
+        ];
+
+        assert!(Note::new(start, lane, NoteKind::Slide { points }).is_ok());
+    }
+
+    #[test]
     fn rejects_an_air_hold_that_does_not_advance_in_time() {
         let position = Position::new(1, 1).expect("valid position");
 
@@ -498,7 +513,7 @@ impl Note {
         };
         if points
             .last()
-            .is_some_and(|last| last.position() >= point.position())
+            .is_some_and(|last| is_invalid_point_order(last.position(), point.position()))
         {
             return Err(ChartError::InvalidSlidePointOrder);
         }
@@ -514,7 +529,7 @@ impl Note {
         };
         if points
             .last()
-            .is_some_and(|last| last.position() >= point.position())
+            .is_some_and(|last| is_invalid_point_order(last.position(), point.position()))
         {
             return Err(ChartError::InvalidSlidePointOrder);
         }
@@ -584,7 +599,7 @@ fn validate_air_path(
         return Err(ChartError::InvalidSlideStart);
     }
     if points.windows(2).any(|points| {
-        points[0].position() >= points[1].position()
+        is_invalid_point_order(points[0].position(), points[1].position())
             || !points[0].height().is_finite()
             || points[0].height() < 0.0
     }) || points
@@ -605,9 +620,14 @@ fn validate_slide(position: Position, lane: Lane, points: &[SlidePoint]) -> Resu
     }
     if points
         .windows(2)
-        .any(|points| points[0].position >= points[1].position)
+        .any(|points| is_invalid_point_order(points[0].position(), points[1].position()))
     {
         return Err(ChartError::InvalidSlidePointOrder);
     }
     Ok(())
+}
+
+/// C2S can encode zero-duration segments, so path points are non-decreasing.
+fn is_invalid_point_order(previous: Position, current: Position) -> bool {
+    previous > current
 }
