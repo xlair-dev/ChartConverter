@@ -266,6 +266,7 @@ pub enum NoteKind {
     AirSlide {
         points: Vec<SlidePoint>,
         properties: AirProperties,
+        end_height: Option<f64>,
         parent: NoteId,
     },
 }
