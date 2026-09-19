@@ -205,6 +205,21 @@ fn write_slide(points: &[SlidePoint], direction: Option<ExDirection>) -> Result<
     if points.len() < 2 {
         return Err(unsupported("slide without an end point"));
     }
+    if !matches!(
+        points.first().map(SlidePoint::kind),
+        Some(SlidePointKind::Visible)
+    ) || !matches!(
+        points.last().map(SlidePoint::kind),
+        Some(SlidePointKind::Visible)
+    ) {
+        return Err(unsupported("slide endpoint kind"));
+    }
+    if points[1..points.len() - 1]
+        .iter()
+        .any(|point| point.kind() != &SlidePointKind::Control)
+    {
+        return Err(unsupported("slide control point kind"));
+    }
     points
         .windows(2)
         .enumerate()
@@ -239,6 +254,12 @@ fn write_air_slide(
 ) -> Result<String, C2sError> {
     if points.len() < 2 {
         return Err(unsupported("AIR Slide without an end point"));
+    }
+    if points
+        .iter()
+        .any(|point| point.kind() != &SlidePointKind::Visible)
+    {
+        return Err(unsupported("AIR Slide point kind"));
     }
     points
         .windows(2)
@@ -1237,7 +1258,7 @@ mod tests {
         ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange,
     };
 
-    use super::{parse, write};
+    use super::{C2sError, parse, write};
 
     #[test]
     fn parses_timing_taps_holds_and_slides() {
@@ -1427,6 +1448,31 @@ mod tests {
         assert!(c2s.contains("SLD\t0\t96\t4\t4\t96\t8\t4"));
         let parsed = parse(&c2s).expect("round-tripped C2S output");
         assert_eq!(parsed.notes(), chart.notes());
+    }
+
+    #[test]
+    fn rejects_slide_point_kinds_that_c2s_cannot_represent() {
+        let points = vec![
+            SlidePoint::new(Position::new(0, 1).unwrap(), Lane::slider(0, 4).unwrap()),
+            SlidePoint::new(Position::new(1, 1).unwrap(), Lane::slider(4, 4).unwrap())
+                .with_kind(SlidePointKind::Invisible),
+            SlidePoint::new(Position::new(2, 1).unwrap(), Lane::slider(8, 4).unwrap()),
+        ];
+        let mut chart = Chart::new();
+        chart.add_note(
+            Note::new(
+                points[0].position(),
+                points[0].lane(),
+                NoteKind::Slide { points },
+            )
+            .expect("valid slide"),
+        );
+
+        assert!(matches!(
+            write(&chart),
+            Err(C2sError::UnsupportedRecord { record, .. })
+                if record == "slide control point kind"
+        ));
     }
 
     #[test]
