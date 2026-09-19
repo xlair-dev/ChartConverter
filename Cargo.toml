@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/c2s", "crates/chart", "crates/sus", "crates/ugc"]
+members = [
+    "crates/c2s",
+    "crates/chart",
+    "crates/sus",
+    "crates/ugc",
+    "crates/xlair-sus-svg",
+]
 
 [workspace.dependencies]
 thiserror = "2.0.11"
