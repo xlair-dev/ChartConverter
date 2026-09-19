@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use chart::{
     Chart, ChartError, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton,
-    SlidePoint, TapKind, TempoChange,
+    SlidePoint, SlidePointKind, TapKind, TempoChange,
 };
 use thiserror::Error;
 
@@ -270,7 +270,11 @@ fn add_slide_records(
         } else if index + 1 == points.len() {
             '2'
         } else {
-            '3'
+            match point.kind() {
+                SlidePointKind::Visible => '3',
+                SlidePointKind::Control => '4',
+                SlidePointKind::Invisible => '5',
+            }
         };
         records.push(Record {
             measure,
@@ -771,7 +775,14 @@ impl Parser {
                         .pending_sliders
                         .get_mut(&channel)
                         .ok_or(SusError::MissingStart { line, channel })?;
-                    pending.points.push(SlidePoint::new(position, lane));
+                    let point_kind = match token[0] {
+                        b'4' => SlidePointKind::Control,
+                        b'5' => SlidePointKind::Invisible,
+                        _ => SlidePointKind::Visible,
+                    };
+                    pending
+                        .points
+                        .push(SlidePoint::new(position, lane).with_kind(point_kind));
                 }
                 _ => return Err(invalid_token(line, token)),
             }
@@ -894,8 +905,8 @@ fn parse_position(value: &str) -> Result<Position, ()> {
 #[cfg(test)]
 mod tests {
     use chart::{
-        Chart, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton, TapKind,
-        TempoChange,
+        Chart, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton,
+        SlidePoint, SlidePointKind, TapKind, TempoChange,
     };
 
     use super::{parse, write};
@@ -947,7 +958,7 @@ mod tests {
 
     #[test]
     fn parses_central_slider_points_across_data_lines() {
-        let chart = parse("#00130A: 143g\n#0023cA: 24").expect("valid SUS");
+        let chart = parse("#00130A: 144g\n#0023cA: 24").expect("valid SUS");
 
         assert_eq!(chart.notes().len(), 1);
         let NoteKind::Slide { points } = chart.notes()[0].kind() else {
@@ -957,6 +968,7 @@ mod tests {
         assert_eq!(points[0].lane(), Lane::slider(0, 4).unwrap());
         assert_eq!(points[1].lane(), Lane::slider(0, 16).unwrap());
         assert_eq!(points[2].lane(), Lane::slider(12, 4).unwrap());
+        assert_eq!(points[1].kind(), &SlidePointKind::Control);
     }
 
     #[test]
@@ -995,6 +1007,35 @@ mod tests {
         assert!(sus.contains("#BPM01: 120"));
         assert!(sus.contains("#00008:"));
         assert!(sus.contains("#0001a:"));
+        assert_eq!(parse(&sus).unwrap().notes(), chart.notes());
+    }
+
+    #[test]
+    fn writes_slide_point_kinds() {
+        let start = Position::new(0, 1).unwrap();
+        let middle = Position::new(1, 4).unwrap();
+        let invisible = Position::new(1, 2).unwrap();
+        let end = Position::new(1, 1).unwrap();
+        let mut chart = Chart::new();
+        chart.add_note(
+            Note::new(
+                start,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::Slide {
+                    points: vec![
+                        SlidePoint::new(start, Lane::slider(0, 4).unwrap()),
+                        SlidePoint::new(middle, Lane::slider(4, 4).unwrap())
+                            .with_kind(SlidePointKind::Control),
+                        SlidePoint::new(invisible, Lane::slider(8, 4).unwrap())
+                            .with_kind(SlidePointKind::Invisible),
+                        SlidePoint::new(end, Lane::slider(12, 4).unwrap()),
+                    ],
+                },
+            )
+            .unwrap(),
+        );
+
+        let sus = write(&chart).expect("valid SUS output");
         assert_eq!(parse(&sus).unwrap().notes(), chart.notes());
     }
 

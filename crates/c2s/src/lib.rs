@@ -3,7 +3,7 @@
 use chart::{
     AirColor, AirCrushColor, AirCrushPoint, AirDirection, AirProperties, Chart, ChartError,
     ExDirection, Lane, Note, NoteId, NoteKind, Position, ScrollScope, ScrollSpeedChange,
-    SlidePoint, TapKind, TempoChange,
+    SlidePoint, SlidePointKind, TapKind, TempoChange,
 };
 use thiserror::Error;
 
@@ -758,7 +758,11 @@ impl Parser {
                 value: duration.to_string(),
             })?,
         )?;
-        let end_point = SlidePoint::new(end, end_lane);
+        let end_point = SlidePoint::new(end, end_lane).with_kind(if fields[0].ends_with('C') {
+            SlidePointKind::Control
+        } else {
+            SlidePointKind::Visible
+        });
         let direction = ex_direction_field
             .map(|field| {
                 parse_ex_direction(
@@ -1230,7 +1234,7 @@ fn parse_u8(line: usize, value: &str) -> Result<u8, C2sError> {
 mod tests {
     use chart::{
         AirCrushColor, AirCrushPoint, Chart, Lane, Note, NoteKind, Position, ScrollScope,
-        ScrollSpeedChange, SlidePoint, TapKind, TempoChange,
+        ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange,
     };
 
     use super::{parse, write};
@@ -1405,7 +1409,8 @@ mod tests {
         let mut chart = Chart::new();
         let points = vec![
             SlidePoint::new(Position::new(0, 1).unwrap(), Lane::slider(0, 4).unwrap()),
-            SlidePoint::new(Position::new(1, 1).unwrap(), Lane::slider(4, 4).unwrap()),
+            SlidePoint::new(Position::new(1, 1).unwrap(), Lane::slider(4, 4).unwrap())
+                .with_kind(SlidePointKind::Control),
             SlidePoint::new(Position::new(2, 1).unwrap(), Lane::slider(8, 4).unwrap()),
         ];
         chart.add_note(
