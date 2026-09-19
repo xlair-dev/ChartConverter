@@ -154,4 +154,35 @@ mod tests {
             }
         }
     }
+
+    fn assert_round_trip(format: Format, source: &str) {
+        let chart = super::parse(format, source).expect("valid source chart");
+        let output = super::write(format, &chart).expect("representable chart");
+        let round_tripped = super::parse(format, &output).expect("valid round-tripped chart");
+        assert_eq!(round_tripped, chart);
+    }
+
+    #[test]
+    fn preserves_c2s_information_through_the_shared_ir() {
+        assert_round_trip(
+            Format::C2s,
+            "RESOLUTION\t384\nBPM\t0\t0\t120.000\nTAP\t0\t96\t4\t2\nHLD\t0\t192\t8\t4\t192\nSLD\t1\t0\t0\t4\t384\t8\t4\n",
+        );
+    }
+
+    #[test]
+    fn preserves_sus_information_through_the_shared_ir() {
+        assert_round_trip(
+            Format::Sus,
+            "#BPM01: 120\n#00008: 01\n#00120A: 14\n#00220A: 24\n",
+        );
+    }
+
+    #[test]
+    fn preserves_ugc_information_through_the_shared_ir() {
+        assert_round_trip(
+            Format::Ugc,
+            "@TICKS\t480\n@BEAT\t0\t4\t4\n@BPM\t0'0\t120\n@ENDHEAD\n#1'480:t04\n#1'960:h04\n#480>s04\n",
+        );
+    }
 }
