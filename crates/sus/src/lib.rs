@@ -79,9 +79,12 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
             NoteKind::Slide { points } => {
                 add_slide_records(&mut records, points, channel)?;
             }
-            NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. } => {
+            NoteKind::Mine
+            | NoteKind::Air { .. }
+            | NoteKind::AirHold { .. }
+            | NoteKind::AirSlide { .. } => {
                 return Err(SusError::UnsupportedNote {
-                    note: "air".to_owned(),
+                    note: "unsupported note kind".to_owned(),
                 });
             }
         }

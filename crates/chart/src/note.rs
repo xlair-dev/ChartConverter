@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use super::{Lane, Note, NoteKind, SideButton, SlidePoint, TapKind};
+    use super::{AirColor, AirProperties, Lane, Note, NoteKind, SideButton, SlidePoint, TapKind};
     use crate::{NoteId, Position};
 
     #[test]
@@ -39,7 +39,7 @@ mod tests {
             position,
             Lane::slider(0, 1).expect("valid lane"),
             NoteKind::Air {
-                direction: super::AirDirection::Up,
+                properties: AirProperties::new(super::AirDirection::Up),
                 parent: NoteId::new(3),
             },
         )
@@ -48,7 +48,7 @@ mod tests {
         assert_eq!(
             note.kind(),
             &NoteKind::Air {
-                direction: super::AirDirection::Up,
+                properties: AirProperties::new(super::AirDirection::Up),
                 parent: NoteId::new(3),
             }
         );
@@ -83,11 +83,26 @@ mod tests {
                 Lane::slider(0, 1).expect("valid lane"),
                 NoteKind::AirHold {
                     end: position,
-                    direction: super::AirDirection::Up,
+                    properties: AirProperties::new(super::AirDirection::Up),
                     parent: NoteId::new(0),
                 },
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn preserves_air_attributes_and_rejects_invalid_height() {
+        let properties = AirProperties::new(super::AirDirection::UpperRight)
+            .with_height(2.5)
+            .expect("valid height")
+            .with_color(AirColor::Inverted);
+        assert_eq!(properties.height(), Some(2.5));
+        assert_eq!(properties.color(), AirColor::Inverted);
+        assert!(
+            AirProperties::new(super::AirDirection::Up)
+                .with_height(f64::NAN)
+                .is_err()
         );
     }
 }
@@ -136,6 +151,54 @@ pub enum AirDirection {
     LowerRight,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AirColor {
+    Normal,
+    Inverted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AirProperties {
+    direction: AirDirection,
+    height: Option<f64>,
+    color: AirColor,
+}
+
+impl AirProperties {
+    pub fn new(direction: AirDirection) -> Self {
+        Self {
+            direction,
+            height: None,
+            color: AirColor::Normal,
+        }
+    }
+
+    pub fn with_height(mut self, height: f64) -> Result<Self, crate::ChartError> {
+        if !height.is_finite() || height < 0.0 {
+            return Err(crate::ChartError::InvalidAirHeight);
+        }
+        self.height = Some(height);
+        Ok(self)
+    }
+
+    pub fn with_color(mut self, color: AirColor) -> Self {
+        self.color = color;
+        self
+    }
+
+    pub fn direction(self) -> AirDirection {
+        self.direction
+    }
+
+    pub fn height(self) -> Option<f64> {
+        self.height
+    }
+
+    pub fn color(self) -> AirColor {
+        self.color
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlidePoint {
     position: Position,
@@ -159,6 +222,7 @@ impl SlidePoint {
 #[derive(Clone, Debug, PartialEq)]
 pub enum NoteKind {
     Tap(TapKind),
+    Mine,
     Hold {
         end: Position,
     },
@@ -166,17 +230,17 @@ pub enum NoteKind {
         points: Vec<SlidePoint>,
     },
     Air {
-        direction: AirDirection,
+        properties: AirProperties,
         parent: NoteId,
     },
     AirHold {
         end: Position,
-        direction: AirDirection,
+        properties: AirProperties,
         parent: NoteId,
     },
     AirSlide {
         points: Vec<SlidePoint>,
-        direction: AirDirection,
+        properties: AirProperties,
         parent: NoteId,
     },
 }
