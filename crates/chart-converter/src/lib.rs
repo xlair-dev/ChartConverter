@@ -90,6 +90,8 @@ pub fn parse(format: Format, source: &str) -> Result<Chart, ConverterError> {
 }
 
 /// Writes a chart using the backend for `format`.
+///
+/// Unsupported or unrepresentable chart information is omitted and reported to stdout.
 pub fn write(format: Format, chart: &Chart) -> Result<String, ConverterError> {
     let result = match format {
         Format::C2s => c2s::write(chart).map_err(FormatError::from),

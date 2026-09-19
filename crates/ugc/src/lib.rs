@@ -1,9 +1,11 @@
 //! Parser and writer for the shared subset of the UGC chart format.
 
+use std::collections::BTreeSet;
+
 use chart::{
     AirColor, AirCrushColor, AirCrushPoint, AirDirection, AirPoint, AirProperties, Chart,
     ChartError, ExDirection, Lane, MeasureTimeline, Note, NoteId, NoteKind, Position, ScrollScope,
-    ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange,
+    ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange, report_loss,
 };
 use thiserror::Error;
 
@@ -31,44 +33,74 @@ pub fn parse(source: &str) -> Result<Chart, UgcError> {
 }
 
 /// Writes the representable shared chart model as a fixed 4/4 UGC document.
+///
+/// Unsupported or unrepresentable chart information is omitted and reported to stdout.
 pub fn write(chart: &Chart) -> Result<String, UgcError> {
     let mut tempo_records = Vec::new();
     for tempo in chart.tempo_changes() {
-        let (measure, tick) = output_position(tempo.position())?;
-        tempo_records.push((
-            measure,
-            tick,
-            format!("@BPM\t{measure}'{tick}\t{:.6}\n", tempo.bpm()),
-        ));
+        match output_position(tempo.position()) {
+            Ok((measure, tick)) => tempo_records.push((
+                measure,
+                tick,
+                format!("@BPM\t{measure}'{tick}\t{:.6}\n", tempo.bpm()),
+            )),
+            Err(error) if is_loss(&error) => report_loss("UGC", error),
+            Err(error) => return Err(error),
+        }
     }
 
     let mut speed_records = Vec::new();
+    let mut speed_groups = BTreeSet::new();
     for change in chart.scroll_speed_changes() {
-        if change.duration().is_some() {
-            return Err(UgcError::UnsupportedNote {
-                note: "scroll speed duration".to_owned(),
-            });
-        }
-        let (measure, tick) = output_position(change.position())?;
-        let speed = format!("{:.6}", change.speed());
-        let text = match change.scope() {
-            ScrollScope::Global => format!("@SPDMOD\t{measure}'{tick}\t{speed}\n"),
-            ScrollScope::Group(group) => {
-                format!("@TIL\t{group}\t{measure}'{tick}\t{speed}\n")
-            }
-            _ => {
+        let record = (|| {
+            if change.duration().is_some() {
                 return Err(UgcError::UnsupportedNote {
-                    note: "unsupported scroll speed scope".to_owned(),
+                    note: "scroll speed duration".to_owned(),
                 });
             }
-        };
-        speed_records.push((measure, tick, text));
+            let (measure, tick) = output_position(change.position())?;
+            let speed = format!("{:.6}", change.speed());
+            let text = match change.scope() {
+                ScrollScope::Global => format!("@SPDMOD\t{measure}'{tick}\t{speed}\n"),
+                ScrollScope::Group(group) => {
+                    format!("@TIL\t{group}\t{measure}'{tick}\t{speed}\n")
+                }
+                _ => {
+                    return Err(UgcError::UnsupportedNote {
+                        note: "unsupported scroll speed scope".to_owned(),
+                    });
+                }
+            };
+            Ok((measure, tick, text))
+        })();
+        match record {
+            Ok(record) => {
+                if let ScrollScope::Group(group) = change.scope() {
+                    speed_groups.insert(group);
+                }
+                speed_records.push(record);
+            }
+            Err(error) if is_loss(&error) => report_loss("UGC", error),
+            Err(error) => return Err(error),
+        }
     }
 
     let mut note_records = Vec::new();
     for (index, note) in chart.notes().iter().enumerate() {
         let note_id = NoteId::new(index as u32);
-        note_records.push(write_note(chart, note_id, note)?);
+        match write_note(chart, note_id, note) {
+            Ok(mut record) => {
+                if let Some(group) = record.speed_group
+                    && !speed_groups.contains(&group)
+                {
+                    report_loss("UGC", format!("note speed group {group}"));
+                    record.speed_group = None;
+                }
+                note_records.push(record);
+            }
+            Err(error) if is_loss(&error) => report_loss("UGC", error),
+            Err(error) => return Err(error),
+        }
     }
     tempo_records.sort_by_key(|(measure, tick, _)| (*measure, *tick));
     speed_records.sort_by_key(|(measure, tick, _)| (*measure, *tick));
@@ -439,6 +471,13 @@ fn output_position(position: Position) -> Result<(u32, u64), UgcError> {
         u32::try_from(measure).map_err(|_| UgcError::UnrepresentablePosition)?,
         u64::try_from(tick).map_err(|_| UgcError::UnrepresentablePosition)?,
     ))
+}
+
+fn is_loss(error: &UgcError) -> bool {
+    matches!(
+        error,
+        UgcError::UnsupportedNote { .. } | UgcError::UnrepresentablePosition
+    )
 }
 
 fn relative_tick(start: Position, end: Position) -> Result<u64, UgcError> {
@@ -1410,6 +1449,25 @@ mod tests {
             parse(speed),
             Err(super::UgcError::UnsupportedRecord { .. })
         ));
+    }
+
+    #[test]
+    fn omits_notes_that_ugc_cannot_represent() {
+        let mut chart = Chart::new();
+        chart.add_note(
+            Note::new(
+                Position::new(0, 1).unwrap(),
+                Lane::Side(chart::SideButton::LeftUpper),
+                NoteKind::Tap(TapKind::Tap),
+            )
+            .expect("valid side note"),
+        );
+
+        let ugc = write(&chart).expect("unsupported note is omitted");
+        assert_eq!(
+            ugc,
+            "@VER\t8\n@EXVER\t1\n@TICKS\t480\n@BEAT\t0\t4\t4\n@ENDHEAD\n"
+        );
     }
 
     #[test]

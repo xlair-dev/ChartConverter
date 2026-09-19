@@ -1,9 +1,11 @@
 //! Parser and writer for the shared note and timing subset of the C2S format.
 
+use std::collections::BTreeSet;
+
 use chart::{
     AirColor, AirCrushColor, AirCrushPoint, AirDirection, AirProperties, Chart, ChartError,
     ExDirection, Lane, Note, NoteId, NoteKind, Position, ScrollScope, ScrollSpeedChange,
-    SlidePoint, SlidePointKind, TapKind, TempoChange,
+    SlidePoint, SlidePointKind, TapKind, TempoChange, report_loss,
 };
 use thiserror::Error;
 
@@ -29,47 +31,73 @@ pub fn parse(source: &str) -> Result<Chart, C2sError> {
 }
 
 /// Writes the representable shared chart model as a C2S document.
+///
+/// Unsupported or unrepresentable chart information is omitted and reported to stdout.
 pub fn write(chart: &Chart) -> Result<String, C2sError> {
     let mut records = Vec::new();
+    let mut speed_groups = BTreeSet::new();
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {
-        let (measure, tick) = output_position(tempo.position())?;
-        records.push(Record::new(
-            measure,
-            tick,
-            index,
-            format!("BPM\t{measure}\t{tick}\t{:.6}", tempo.bpm()),
-        ));
+        match output_position(tempo.position()) {
+            Ok((measure, tick)) => records.push(Record::new(
+                measure,
+                tick,
+                index,
+                format!("BPM\t{measure}\t{tick}\t{:.6}", tempo.bpm()),
+            )),
+            Err(error) if is_loss(&error) => report_loss("C2S", error),
+            Err(error) => return Err(error),
+        }
     }
     for (index, change) in chart.scroll_speed_changes().iter().enumerate() {
-        let (measure, tick) = output_position(change.position())?;
-        let duration = change.duration().ok_or(C2sError::UnsupportedRecord {
-            line: 0,
-            record: "scroll speed without duration".to_owned(),
-        })?;
-        let duration = output_ticks(duration)?;
-        let (kind, group) = match change.scope() {
-            ScrollScope::Global => ("SFL", None),
-            ScrollScope::Group(group) => ("SLP", Some(group.to_string())),
-            _ => {
-                return Err(C2sError::UnsupportedRecord {
-                    line: 0,
-                    record: "unsupported scroll speed scope".to_owned(),
-                });
+        let record = (|| {
+            let (measure, tick) = output_position(change.position())?;
+            let duration = change.duration().ok_or(C2sError::UnsupportedRecord {
+                line: 0,
+                record: "scroll speed without duration".to_owned(),
+            })?;
+            let duration = output_ticks(duration)?;
+            let (kind, group) = match change.scope() {
+                ScrollScope::Global => ("SFL", None),
+                ScrollScope::Group(group) => ("SLP", Some(group.to_string())),
+                _ => {
+                    return Err(C2sError::UnsupportedRecord {
+                        line: 0,
+                        record: "unsupported scroll speed scope".to_owned(),
+                    });
+                }
+            };
+            let suffix = group.map_or_else(String::new, |group| format!("\t{group}"));
+            Ok(Record::new(
+                measure,
+                tick,
+                index,
+                format!(
+                    "{kind}\t{measure}\t{tick}\t{duration}\t{:.6}{suffix}",
+                    change.speed()
+                ),
+            ))
+        })();
+        match record {
+            Ok(record) => {
+                if let ScrollScope::Group(group) = change.scope() {
+                    speed_groups.insert(group);
+                }
+                records.push(record);
             }
-        };
-        let suffix = group.map_or_else(String::new, |group| format!("\t{group}"));
-        records.push(Record::new(
-            measure,
-            tick,
-            index,
-            format!(
-                "{kind}\t{measure}\t{tick}\t{duration}\t{:.6}{suffix}",
-                change.speed()
-            ),
-        ));
+            Err(error) if is_loss(&error) => report_loss("C2S", error),
+            Err(error) => return Err(error),
+        }
     }
     for (index, note) in chart.notes().iter().enumerate() {
-        write_note(chart, index, note, &mut records)?;
+        let record_start = records.len();
+        match write_note(chart, index, note, &mut records, &speed_groups) {
+            Ok(()) => {}
+            Err(error) if is_loss(&error) => {
+                records.truncate(record_start);
+                report_loss("C2S", error);
+            }
+            Err(error) => return Err(error),
+        }
     }
     records.sort_by_key(|record| (record.measure, record.tick, record.order));
 
@@ -104,6 +132,7 @@ fn write_note(
     index: usize,
     note: &Note,
     records: &mut Vec<Record>,
+    speed_groups: &BTreeSet<u32>,
 ) -> Result<(), C2sError> {
     let (measure, tick) = output_position(note.position())?;
     let (lane, width) = c2s_lane(note.lane())?;
@@ -188,15 +217,19 @@ fn write_note(
         .note_speed_group(id)
         .map_err(|_| C2sError::MalformedRecord { line: 0 })?
     {
-        records.push(Record::new(
-            measure,
-            tick,
-            index,
-            format!(
-                "SLA\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{group}",
-                note_duration_ticks(note)?
-            ),
-        ));
+        if speed_groups.contains(&group) {
+            records.push(Record::new(
+                measure,
+                tick,
+                index,
+                format!(
+                    "SLA\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{group}",
+                    note_duration_ticks(note)?
+                ),
+            ));
+        } else {
+            report_loss("C2S", format!("note speed group {group}"));
+        }
     }
     Ok(())
 }
@@ -417,6 +450,13 @@ fn unsupported(record: &str) -> C2sError {
         line: 0,
         record: record.to_owned(),
     }
+}
+
+fn is_loss(error: &C2sError) -> bool {
+    matches!(
+        error,
+        C2sError::UnsupportedRecord { .. } | C2sError::UnrepresentablePosition
+    )
 }
 
 struct Parser {
@@ -1258,7 +1298,7 @@ mod tests {
         ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange,
     };
 
-    use super::{C2sError, parse, write};
+    use super::{parse, write};
 
     #[test]
     fn parses_timing_taps_holds_and_slides() {
@@ -1451,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_slide_point_kinds_that_c2s_cannot_represent() {
+    fn omits_slide_point_kinds_that_c2s_cannot_represent() {
         let points = vec![
             SlidePoint::new(Position::new(0, 1).unwrap(), Lane::slider(0, 4).unwrap()),
             SlidePoint::new(Position::new(1, 1).unwrap(), Lane::slider(4, 4).unwrap())
@@ -1468,11 +1508,8 @@ mod tests {
             .expect("valid slide"),
         );
 
-        assert!(matches!(
-            write(&chart),
-            Err(C2sError::UnsupportedRecord { record, .. })
-                if record == "slide control point kind"
-        ));
+        let c2s = write(&chart).expect("unsupported slide is omitted");
+        assert_eq!(c2s, "RESOLUTION\t384\n");
     }
 
     #[test]
