@@ -1,6 +1,9 @@
 //! Parser for the note and timing subset of the C2S chart format.
 
-use chart::{Chart, ChartError, Lane, Note, NoteKind, Position, SlidePoint, TapKind, TempoChange};
+use chart::{
+    AirDirection, AirProperties, Chart, ChartError, ExDirection, Lane, Note, NoteId, NoteKind,
+    Position, ScrollScope, ScrollSpeedChange, SlidePoint, TapKind, TempoChange,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq)]
@@ -26,6 +29,8 @@ struct Parser {
     resolution: Option<u64>,
     timeline: chart::MeasureTimeline,
     chart: Chart,
+    last_ex_parent: Option<NoteId>,
+    last_air_direction: Option<AirDirection>,
 }
 
 impl Parser {
@@ -34,6 +39,8 @@ impl Parser {
             resolution: None,
             timeline: chart::MeasureTimeline::new(Position::new(4, 1).unwrap()),
             chart: Chart::new(),
+            last_ex_parent: None,
+            last_air_direction: None,
         }
     }
 
@@ -50,9 +57,13 @@ impl Parser {
                 "MET" => self.parse_met(line, &fields)?,
                 "TAP" => self.parse_tap(line, &fields, TapKind::Tap)?,
                 "FLK" => self.parse_tap(line, &fields, TapKind::Flick)?,
+                "MNE" => self.parse_mine(line, &fields)?,
+                "CHR" => self.parse_ex_tap(line, &fields)?,
+                "AIR" => self.parse_air(line, &fields)?,
                 "HLD" => self.parse_hold(line, &fields)?,
                 "SLD" => self.parse_slide(line, &fields)?,
-                "AIR" | "CHR" | "AHD" | "SXD" | "SLC" | "SXC" | "ALD" => {
+                "SFL" | "SLP" => self.parse_scroll_speed(line, &fields)?,
+                "AHD" | "SXD" | "SLC" | "SXC" | "ALD" => {
                     return Err(C2sError::UnsupportedRecord {
                         line,
                         record: fields[0].to_owned(),
@@ -136,6 +147,109 @@ impl Parser {
         )?;
         let position = self.position(line, measure, tick)?;
         self.add_note(line, Note::new(position, lane, NoteKind::Tap(kind)))
+            .map(|_| ())
+    }
+
+    fn parse_mine(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+        let (measure, tick) = self.location(line, fields)?;
+        let lane = self.lane(
+            line,
+            fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
+            fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let position = self.position(line, measure, tick)?;
+        self.add_note(line, Note::new(position, lane, NoteKind::Mine))
+            .map(|_| ())
+    }
+
+    fn parse_ex_tap(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+        let (measure, tick) = self.location(line, fields)?;
+        let lane = self.lane(
+            line,
+            fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
+            fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let direction = parse_ex_direction(
+            line,
+            fields.get(5).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let position = self.position(line, measure, tick)?;
+        let id = self.add_note(
+            line,
+            Note::new(position, lane, NoteKind::ExTap { direction }),
+        )?;
+        self.last_ex_parent = Some(id);
+        self.last_air_direction = Some(air_direction_from_ex(line, direction)?);
+        Ok(())
+    }
+
+    fn parse_air(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+        let parent_type = fields.get(5).ok_or(C2sError::MalformedRecord { line })?;
+        if *parent_type != "CHR" || fields.get(6) != Some(&"DEF") {
+            return Err(C2sError::InvalidValue {
+                line,
+                value: fields[5..].join(" "),
+            });
+        }
+        let parent = self.last_ex_parent.ok_or(C2sError::InvalidValue {
+            line,
+            value: "AIR without CHR parent".to_owned(),
+        })?;
+        let (measure, tick) = self.location(line, fields)?;
+        let lane = self.lane(
+            line,
+            fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
+            fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let position = self.position(line, measure, tick)?;
+        let direction = self.last_air_direction.ok_or(C2sError::InvalidValue {
+            line,
+            value: "CHR without an AIR direction".to_owned(),
+        })?;
+        let properties = AirProperties::new(direction);
+        self.add_note(
+            line,
+            Note::new(position, lane, NoteKind::Air { properties, parent }),
+        )?;
+        Ok(())
+    }
+
+    fn parse_scroll_speed(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+        let (measure, tick) = self.location(line, fields)?;
+        let duration = parse_u64(
+            line,
+            fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let speed = fields
+            .get(4)
+            .ok_or(C2sError::MalformedRecord { line })?
+            .parse::<f64>()
+            .map_err(|_| C2sError::InvalidValue {
+                line,
+                value: fields[4].to_owned(),
+            })?;
+        let scope = if fields[0] == "SLP" {
+            ScrollScope::Group(parse_u32(
+                line,
+                fields.get(5).ok_or(C2sError::MalformedRecord { line })?,
+            )?)
+        } else {
+            ScrollScope::Global
+        };
+        let position = self.position(line, measure, tick)?;
+        let resolution = self.resolution.ok_or(C2sError::MissingResolution)?;
+        let duration = Position::new(
+            duration.checked_mul(4).ok_or(C2sError::InvalidValue {
+                line,
+                value: duration.to_string(),
+            })?,
+            resolution,
+        )
+        .map_err(|source| C2sError::Chart { line, source })?;
+        let change = ScrollSpeedChange::with_duration(position, speed, scope, duration)
+            .map_err(|source| C2sError::Chart { line, source })?;
+        self.chart.add_scroll_speed_change(change);
+        Ok(())
     }
 
     fn parse_hold(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
@@ -159,6 +273,7 @@ impl Parser {
             })?,
         )?;
         self.add_note(line, Note::new(start, lane, NoteKind::Hold { end }))
+            .map(|_| ())
     }
 
     fn parse_slide(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
@@ -194,6 +309,7 @@ impl Parser {
             line,
             Note::new(start, start_lane, NoteKind::Slide { points }),
         )
+        .map(|_| ())
     }
 
     fn location(&self, line: usize, fields: &[&str]) -> Result<(u32, u64), C2sError> {
@@ -232,10 +348,44 @@ impl Parser {
             .map_err(|source| C2sError::Chart { line, source })
     }
 
-    fn add_note(&mut self, line: usize, note: Result<Note, ChartError>) -> Result<(), C2sError> {
-        self.chart
-            .add_note(note.map_err(|source| C2sError::Chart { line, source })?);
-        Ok(())
+    fn add_note(
+        &mut self,
+        line: usize,
+        note: Result<Note, ChartError>,
+    ) -> Result<NoteId, C2sError> {
+        Ok(self
+            .chart
+            .add_note(note.map_err(|source| C2sError::Chart { line, source })?))
+    }
+}
+
+fn parse_ex_direction(line: usize, value: &str) -> Result<ExDirection, C2sError> {
+    match value {
+        "UP" => Ok(ExDirection::Up),
+        "DW" => Ok(ExDirection::Down),
+        "CE" => Ok(ExDirection::Center),
+        "ALL" => Ok(ExDirection::All),
+        "VLT" => Ok(ExDirection::Wide),
+        "LS" | "L" => Ok(ExDirection::Left),
+        "RS" | "R" => Ok(ExDirection::Right),
+        "IN" | "I" => Ok(ExDirection::Inward),
+        _ => Err(C2sError::InvalidValue {
+            line,
+            value: value.to_owned(),
+        }),
+    }
+}
+
+fn air_direction_from_ex(line: usize, direction: ExDirection) -> Result<AirDirection, C2sError> {
+    match direction {
+        ExDirection::Up => Ok(AirDirection::Up),
+        ExDirection::Down => Ok(AirDirection::Down),
+        ExDirection::Left => Ok(AirDirection::UpperLeft),
+        ExDirection::Right => Ok(AirDirection::UpperRight),
+        _ => Err(C2sError::InvalidValue {
+            line,
+            value: "unsupported AIR direction".to_owned(),
+        }),
     }
 }
 
@@ -285,10 +435,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_air_records_until_parent_references_are_supported() {
-        let error =
-            parse("RESOLUTION\t384\nAIR\t0\t0\t4\t2\tCHR\tDEF").expect_err("unsupported AIR");
-        assert!(matches!(error, super::C2sError::UnsupportedRecord { .. }));
+    fn parses_mines_air_parents_and_scroll_speed_records() {
+        let source = "RESOLUTION\t384\nCHR\t0\t0\t4\t2\tDW\nAIR\t0\t0\t4\t2\tCHR\tDEF\nMNE\t0\t96\t8\t1\nSFL\t0\t0\t96\t1.5\nSLP\t1\t0\t96\t2.0\t3\n";
+        let chart = parse(source).expect("valid extended C2S");
+
+        assert!(matches!(chart.notes()[0].kind(), NoteKind::ExTap { .. }));
+        let NoteKind::Air { parent, .. } = chart.notes()[1].kind() else {
+            panic!("expected an air note");
+        };
+        assert_eq!(*parent, chart::NoteId::new(0));
+        assert_eq!(chart.notes()[2].kind(), &NoteKind::Mine);
+        assert_eq!(chart.scroll_speed_changes().len(), 2);
+        assert_eq!(
+            chart.scroll_speed_changes()[1].scope(),
+            chart::ScrollScope::Group(3)
+        );
     }
 
     #[test]

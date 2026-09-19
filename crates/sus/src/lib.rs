@@ -72,6 +72,11 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
                     token: format!("{token}{}", base36_digit(lane_width(note.lane())?)),
                 });
             }
+            NoteKind::ExTap { .. } => {
+                return Err(SusError::UnsupportedNote {
+                    note: "ExTap".to_owned(),
+                });
+            }
             NoteKind::Hold { end } => {
                 let (lane, width) = central_lane_parts(note.lane(), "hold")?;
                 add_hold_records(&mut records, note.position(), *end, lane, width, channel)?;

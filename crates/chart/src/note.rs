@@ -142,6 +142,18 @@ pub enum TapKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExDirection {
+    Up,
+    Down,
+    Center,
+    All,
+    Wide,
+    Left,
+    Right,
+    Inward,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AirDirection {
     Up,
     UpperLeft,
@@ -222,6 +234,9 @@ impl SlidePoint {
 #[derive(Clone, Debug, PartialEq)]
 pub enum NoteKind {
     Tap(TapKind),
+    ExTap {
+        direction: ExDirection,
+    },
     Mine,
     Hold {
         end: Position,

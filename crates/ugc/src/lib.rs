@@ -88,6 +88,11 @@ fn write_note(note: &Note) -> Result<OutputRecord, UgcError> {
                 encode_base36(width)
             )
         }
+        NoteKind::ExTap { .. } => {
+            return Err(UgcError::UnsupportedNote {
+                note: "ExTap".to_owned(),
+            });
+        }
         NoteKind::Hold { end } => {
             let offset = relative_tick(note.position(), *end)?;
             format!(
