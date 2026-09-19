@@ -3,7 +3,7 @@
 use chart::{
     AirColor, AirCrushColor, AirCrushPoint, AirDirection, AirPoint, AirProperties, Chart,
     ChartError, ExDirection, Lane, MeasureTimeline, Note, NoteId, NoteKind, Position, ScrollScope,
-    ScrollSpeedChange, SlidePoint, TapKind, TempoChange,
+    ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange,
 };
 use thiserror::Error;
 
@@ -258,8 +258,9 @@ fn write_non_air_note(
                 let (point_lane, point_width) = central_lane(point.lane())?;
                 let offset = relative_tick(note.position(), point.position())?;
                 text.push_str(&format!(
-                    "#{}>s{}{}\n",
+                    "#{}>{}{}{}\n",
                     offset,
+                    encode_slide_point_marker(point.kind())?,
                     encode_base36(point_lane),
                     encode_base36(point_width),
                 ));
@@ -286,8 +287,9 @@ fn write_non_air_note(
                 let (point_lane, point_width) = central_lane(point.lane())?;
                 let offset = relative_tick(note.position(), point.position())?;
                 text.push_str(&format!(
-                    "#{}>s{}{}\n",
+                    "#{}>{}{}{}\n",
                     offset,
+                    encode_slide_point_marker(point.kind())?,
                     encode_base36(point_lane),
                     encode_base36(point_width),
                 ));
@@ -357,8 +359,9 @@ fn write_air_note(note: &Note, prefix: &str) -> Result<String, UgcError> {
             );
             for point in points.iter().skip(1) {
                 let (point_lane, point_width) = central_lane(point.lane())?;
+                let marker = encode_slide_point_marker(point.kind())?;
                 text.push_str(&format!(
-                    "#{}>s{}{}{}\n",
+                    "#{}>{marker}{}{}{}\n",
                     relative_tick(note.position(), point.position())?,
                     encode_base36(point_lane),
                     encode_base36(point_width),
@@ -401,6 +404,16 @@ fn write_air_note(note: &Note, prefix: &str) -> Result<String, UgcError> {
             Ok(text)
         }
         _ => unreachable!("non-AIR note passed to write_air_note"),
+    }
+}
+
+fn encode_slide_point_marker(kind: &SlidePointKind) -> Result<char, UgcError> {
+    match kind {
+        SlidePointKind::Visible => Ok('s'),
+        SlidePointKind::Control => Ok('c'),
+        SlidePointKind::Invisible => Err(UgcError::UnsupportedNote {
+            note: "invisible slide point".to_owned(),
+        }),
     }
 }
 
@@ -1106,18 +1119,25 @@ impl Parser {
                     source,
                 })?;
             let lane = parse_lane(line + consumed + 1, &data[1..3])?;
+            let point_kind = if marker == 'c' {
+                SlidePointKind::Control
+            } else {
+                SlidePointKind::Visible
+            };
             if kind == 's' && air_points.is_some() {
                 let height = parse_air_height(line + consumed + 1, &data[3..])?;
                 if let Some(air_points) = &mut air_points {
-                    air_points.push(AirPoint::new(endpoint, lane, height).map_err(|source| {
-                        UgcError::Chart {
-                            line: line + consumed + 1,
-                            source,
-                        }
-                    })?);
+                    air_points.push(
+                        AirPoint::new(endpoint, lane, height)
+                            .map_err(|source| UgcError::Chart {
+                                line: line + consumed + 1,
+                                source,
+                            })?
+                            .with_kind(point_kind.clone()),
+                    );
                 }
             }
-            points.push(SlidePoint::new(endpoint, lane));
+            points.push(SlidePoint::new(endpoint, lane).with_kind(point_kind));
             consumed += 1;
         }
         if points.len() == 1 {
@@ -1359,7 +1379,7 @@ fn parse_u32(line: usize, value: &str) -> Result<u32, UgcError> {
 mod tests {
     use chart::{
         AirCrushColor, AirCrushPoint, Chart, Lane, Note, NoteKind, Position, ScrollScope,
-        ScrollSpeedChange, SlidePoint, TapKind,
+        ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind,
     };
 
     use super::{parse, write};
@@ -1541,6 +1561,31 @@ mod tests {
         assert!(ugc.contains(":s44"));
         let parsed = parse(&ugc).expect("round-tripped UGC output");
         assert_eq!(parsed.notes(), chart.notes());
+    }
+
+    #[test]
+    fn writes_and_parses_slide_control_points() {
+        let start = Position::new(0, 1).unwrap();
+        let middle = Position::new(1, 2).unwrap();
+        let end = Position::new(1, 1).unwrap();
+        let points = vec![
+            SlidePoint::new(start, Lane::slider(0, 4).unwrap()),
+            SlidePoint::new(middle, Lane::slider(4, 4).unwrap()).with_kind(SlidePointKind::Control),
+            SlidePoint::new(end, Lane::slider(8, 4).unwrap()),
+        ];
+        let mut chart = Chart::new();
+        chart.add_note(
+            Note::new(
+                start,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::Slide { points },
+            )
+            .unwrap(),
+        );
+
+        let ugc = write(&chart).expect("valid UGC output");
+        assert!(ugc.contains("#240>c44"));
+        assert_eq!(parse(&ugc).unwrap().notes(), chart.notes());
     }
 
     #[test]

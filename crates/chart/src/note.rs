@@ -337,14 +337,31 @@ impl AirProperties {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum SlidePointKind {
+    Visible,
+    Control,
+    Invisible,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct SlidePoint {
     position: Position,
     lane: Lane,
+    kind: SlidePointKind,
 }
 
 impl SlidePoint {
     pub fn new(position: Position, lane: Lane) -> Self {
-        Self { position, lane }
+        Self {
+            position,
+            lane,
+            kind: SlidePointKind::Visible,
+        }
+    }
+
+    pub fn with_kind(mut self, kind: SlidePointKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     pub fn position(&self) -> Position {
@@ -353,6 +370,10 @@ impl SlidePoint {
 
     pub fn lane(&self) -> Lane {
         self.lane
+    }
+
+    pub fn kind(&self) -> &SlidePointKind {
+        &self.kind
     }
 }
 
@@ -493,6 +514,7 @@ pub struct AirPoint {
     position: Position,
     lane: Lane,
     height: f64,
+    kind: SlidePointKind,
 }
 
 impl AirPoint {
@@ -504,7 +526,13 @@ impl AirPoint {
             position,
             lane,
             height,
+            kind: SlidePointKind::Visible,
         })
+    }
+
+    pub fn with_kind(mut self, kind: SlidePointKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     pub fn position(&self) -> Position {
@@ -517,6 +545,10 @@ impl AirPoint {
 
     pub fn height(&self) -> f64 {
         self.height
+    }
+
+    pub fn kind(&self) -> &SlidePointKind {
+        &self.kind
     }
 }
 
