@@ -37,6 +37,8 @@ pub enum ScrollScope {
     Lane(Lane),
     /// Applies only to one note and is used for format-specific note speed records.
     Note(NoteId),
+    /// Identifies a format-specific speed definition applied to notes in a group.
+    Group(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
