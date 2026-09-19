@@ -30,14 +30,8 @@ pub fn parse(source: &str) -> Result<Chart, UgcError> {
     Parser::new().parse(source)
 }
 
-/// Writes the basic central-lane chart model as a fixed 4/4 UGC document.
+/// Writes the representable shared chart model as a fixed 4/4 UGC document.
 pub fn write(chart: &Chart) -> Result<String, UgcError> {
-    if !chart.scroll_speed_changes().is_empty() {
-        return Err(UgcError::UnsupportedNote {
-            note: "scroll speed changes".to_owned(),
-        });
-    }
-
     let mut tempo_records = Vec::new();
     for tempo in chart.tempo_changes() {
         let (measure, tick) = output_position(tempo.position())?;
@@ -48,19 +42,64 @@ pub fn write(chart: &Chart) -> Result<String, UgcError> {
         ));
     }
 
+    let mut speed_records = Vec::new();
+    for change in chart.scroll_speed_changes() {
+        if change.duration().is_some() {
+            return Err(UgcError::UnsupportedNote {
+                note: "scroll speed duration".to_owned(),
+            });
+        }
+        let (measure, tick) = output_position(change.position())?;
+        let speed = format!("{:.6}", change.speed());
+        let text = match change.scope() {
+            ScrollScope::Global => format!("@SPDMOD\t{measure}'{tick}\t{speed}\n"),
+            ScrollScope::Group(group) => {
+                format!("@TIL\t{group}\t{measure}'{tick}\t{speed}\n")
+            }
+            _ => {
+                return Err(UgcError::UnsupportedNote {
+                    note: "unsupported scroll speed scope".to_owned(),
+                });
+            }
+        };
+        speed_records.push((measure, tick, text));
+    }
+
     let mut note_records = Vec::new();
-    for note in chart.notes() {
-        note_records.push(write_note(note)?);
+    for (index, note) in chart.notes().iter().enumerate() {
+        let note_id = NoteId::new(index as u32);
+        note_records.push(write_note(chart, note_id, note)?);
     }
     tempo_records.sort_by_key(|(measure, tick, _)| (*measure, *tick));
-    note_records.sort_by_key(|record| (record.measure, record.tick));
+    speed_records.sort_by_key(|(measure, tick, _)| (*measure, *tick));
+    note_records.sort_by_key(|record| {
+        (
+            record.measure,
+            record.tick,
+            record.parent_order,
+            record.is_air,
+            record.order,
+        )
+    });
 
     let mut output = String::from("@VER\t8\n@EXVER\t1\n@TICKS\t480\n@BEAT\t0\t4\t4\n");
     for (_, _, text) in tempo_records {
         output.push_str(&text);
     }
+    for (_, _, text) in speed_records {
+        output.push_str(&text);
+    }
     output.push_str("@ENDHEAD\n");
+    let mut current_speed_group = None;
     for record in note_records {
+        if record.speed_group != current_speed_group {
+            if let Some(group) = record.speed_group {
+                output.push_str(&format!("@USETIL\t{group}\n"));
+            } else if current_speed_group.is_some() {
+                output.push_str("@USETIL\t0\n");
+            }
+            current_speed_group = record.speed_group;
+        }
         output.push_str(&record.text);
     }
     Ok(output)
@@ -69,13 +108,57 @@ pub fn write(chart: &Chart) -> Result<String, UgcError> {
 struct OutputRecord {
     measure: u32,
     tick: u64,
+    order: u32,
+    parent_order: u32,
+    is_air: bool,
+    speed_group: Option<u32>,
     text: String,
 }
 
-fn write_note(note: &Note) -> Result<OutputRecord, UgcError> {
+fn write_note(chart: &Chart, note_id: NoteId, note: &Note) -> Result<OutputRecord, UgcError> {
     let (measure, tick) = output_position(note.position())?;
     let (lane, width) = central_lane(note.lane())?;
     let prefix = format!("#{measure}'{tick}:");
+    let is_air = matches!(
+        note.kind(),
+        NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. }
+    );
+    let (parent, text) = match note.kind() {
+        NoteKind::Air { parent, .. }
+        | NoteKind::AirHold { parent, .. }
+        | NoteKind::AirSlide { parent, .. } => (Some(*parent), write_air_note(note, &prefix)?),
+        _ => (None, write_non_air_note(note, &prefix, lane, width)?),
+    };
+    if let Some(parent) = parent {
+        let parent_note = chart.note(parent).map_err(|_| UgcError::InvalidValue {
+            line: 0,
+            value: "invalid AIR parent".to_owned(),
+        })?;
+        if parent_note.position() > note.position() {
+            return Err(UgcError::InvalidValue {
+                line: 0,
+                value: "AIR parent appears after its child".to_owned(),
+            });
+        }
+    }
+    let speed_group = chart
+        .note_speed_group(note_id)
+        .map_err(|_| UgcError::InvalidValue {
+            line: 0,
+            value: "invalid note id".to_owned(),
+        })?;
+    Ok(OutputRecord {
+        measure,
+        tick,
+        order: note_id.value(),
+        parent_order: parent.map_or(note_id.value(), NoteId::value),
+        is_air,
+        speed_group,
+        text,
+    })
+}
+
+fn write_non_air_note(note: &Note, prefix: &str, lane: u8, width: u8) -> Result<String, UgcError> {
     let text = match note.kind() {
         NoteKind::Tap(kind) => {
             let type_code = match kind {
@@ -86,10 +169,7 @@ fn write_note(note: &Note) -> Result<OutputRecord, UgcError> {
             let suffix = match kind {
                 TapKind::Tap => "".to_owned(),
                 TapKind::XTap => "".to_owned(),
-                TapKind::Flick { direction } => direction
-                    .map(encode_ex_direction)
-                    .unwrap_or_default()
-                    .to_owned(),
+                TapKind::Flick { direction } => encode_flick_direction(*direction)?,
             };
             format!(
                 "{prefix}{type_code}{}{}{suffix}\n",
@@ -97,10 +177,7 @@ fn write_note(note: &Note) -> Result<OutputRecord, UgcError> {
                 encode_base36(width)
             )
         }
-        NoteKind::ExTap { .. } => {
-            let NoteKind::ExTap { direction } = note.kind() else {
-                unreachable!();
-            };
+        NoteKind::ExTap { direction } => {
             format!(
                 "{prefix}x{}{}{}\n",
                 encode_base36(lane),
@@ -108,6 +185,7 @@ fn write_note(note: &Note) -> Result<OutputRecord, UgcError> {
                 encode_ex_direction(*direction)
             )
         }
+        NoteKind::Mine => format!("{prefix}d{}{}\n", encode_base36(lane), encode_base36(width)),
         NoteKind::Hold { end } => {
             let offset = relative_tick(note.position(), *end)?;
             format!(
@@ -133,20 +211,75 @@ fn write_note(note: &Note) -> Result<OutputRecord, UgcError> {
             }
             text
         }
-        NoteKind::Mine
-        | NoteKind::Air { .. }
-        | NoteKind::AirHold { .. }
-        | NoteKind::AirSlide { .. } => {
-            return Err(UgcError::UnsupportedNote {
-                note: "unsupported note kind".to_owned(),
-            });
+        NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. } => {
+            unreachable!("AIR notes are written by write_air_note")
         }
     };
-    Ok(OutputRecord {
-        measure,
-        tick,
-        text,
-    })
+    Ok(text)
+}
+
+fn write_air_note(note: &Note, prefix: &str) -> Result<String, UgcError> {
+    match note.kind() {
+        NoteKind::Air { properties, .. } => {
+            let (lane, width) = central_lane(note.lane())?;
+            properties.direction().ok_or(UgcError::UnsupportedNote {
+                note: "AIR direction".to_owned(),
+            })?;
+            let attributes = encode_air_attributes(*properties)?;
+            Ok(format!(
+                "{prefix}a{}{}{}\n",
+                encode_base36(lane),
+                encode_base36(width),
+                attributes
+            ))
+        }
+        NoteKind::AirHold {
+            end, properties, ..
+        } => {
+            let (lane, width) = central_lane(note.lane())?;
+            let attributes = encode_air_attributes(*properties)?;
+            Ok(format!(
+                "{prefix}H{}{}{}\n#{}>s{}{}\n",
+                encode_base36(lane),
+                encode_base36(width),
+                attributes,
+                relative_tick(note.position(), *end)?,
+                encode_base36(lane),
+                encode_base36(width)
+            ))
+        }
+        NoteKind::AirSlide {
+            points,
+            properties,
+            end_height,
+            ..
+        } => {
+            if points.len() != 2 {
+                return Err(UgcError::UnsupportedNote {
+                    note: "multi-segment AIR Slide".to_owned(),
+                });
+            }
+            let (lane, width) = central_lane(note.lane())?;
+            let attributes = encode_air_attributes(*properties)?;
+            let end = &points[1];
+            let (end_lane, end_width) = central_lane(end.lane())?;
+            let end_height = end_height
+                .map(encode_air_height)
+                .transpose()?
+                .unwrap_or_default();
+            Ok(format!(
+                "{prefix}S{}{}{}\n#{}>s{}{}{}\n",
+                encode_base36(lane),
+                encode_base36(width),
+                attributes,
+                relative_tick(note.position(), end.position())?,
+                encode_base36(end_lane),
+                encode_base36(end_width),
+                end_height
+            ))
+        }
+        _ => unreachable!("non-AIR note passed to write_air_note"),
+    }
 }
 
 fn central_lane(lane: Lane) -> Result<(u8, u8), UgcError> {
@@ -205,6 +338,65 @@ fn encode_ex_direction(direction: ExDirection) -> &'static str {
         ExDirection::Right => "R",
         ExDirection::Inward => "I",
     }
+}
+
+fn encode_flick_direction(direction: Option<ExDirection>) -> Result<String, UgcError> {
+    match direction {
+        None => Ok(String::new()),
+        Some(ExDirection::All) => Ok("A".to_owned()),
+        Some(ExDirection::Left) => Ok("L".to_owned()),
+        Some(ExDirection::Right) => Ok("R".to_owned()),
+        Some(_) => Err(UgcError::UnsupportedNote {
+            note: "unsupported Flick direction".to_owned(),
+        }),
+    }
+}
+
+fn encode_air_attributes(properties: AirProperties) -> Result<String, UgcError> {
+    let direction = properties.direction().map(|direction| match direction {
+        AirDirection::Up => "UC",
+        AirDirection::UpperLeft => "UL",
+        AirDirection::UpperRight => "UR",
+        AirDirection::Down => "DC",
+        AirDirection::LowerLeft => "DL",
+        AirDirection::LowerRight => "DR",
+    });
+    let height = properties
+        .height()
+        .map(encode_air_height)
+        .transpose()?
+        .unwrap_or_default();
+    let color = match properties.color() {
+        AirColor::Normal => 'N',
+        AirColor::Inverted => 'I',
+    };
+    Ok(format!("{}{}{}", direction.unwrap_or(""), height, color))
+}
+
+fn encode_air_height(height: f64) -> Result<String, UgcError> {
+    if !height.is_finite() || height < 1.0 {
+        return Err(UgcError::UnsupportedNote {
+            note: "AIR height cannot be represented by UGC".to_owned(),
+        });
+    }
+    let raw = (height - 1.0) * 20.0;
+    let rounded = raw.round();
+    if (raw - rounded).abs() > 1e-9 || rounded > 1295.0 {
+        return Err(UgcError::UnsupportedNote {
+            note: "AIR height cannot be represented by UGC".to_owned(),
+        });
+    }
+    let raw = rounded as u32;
+    Ok(format!(
+        "{}{}",
+        encode_base36_u32(raw / 36),
+        encode_base36_u32(raw % 36)
+    ))
+}
+
+fn encode_base36_u32(value: u32) -> char {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    char::from(DIGITS[value as usize])
 }
 
 struct Parser {
@@ -419,7 +611,7 @@ impl Parser {
         let position = self.position(line, measure, tick)?;
         let kind = code.as_bytes()[0] as char;
         match kind {
-            't' | 'x' | 'f' => {
+            't' | 'x' | 'f' | 'd' => {
                 let lane = parse_lane(line, &code[1..3])?;
                 let tap_kind = match kind {
                     't' => TapKind::Tap,
@@ -428,13 +620,22 @@ impl Parser {
                     'f' => TapKind::Flick {
                         direction: parse_flick_direction(line, &code[3..])?,
                     },
+                    'd' => {
+                        let note = Note::new(position, lane, NoteKind::Mine)
+                            .map_err(|source| UgcError::Chart { line, source })?;
+                        return Ok((0, Some(note)));
+                    }
                     _ => unreachable!(),
                 };
                 let note = Note::new(position, lane, NoteKind::Tap(tap_kind))
                     .map_err(|source| UgcError::Chart { line, source })?;
                 Ok((0, Some(note)))
             }
-            'h' | 's' => self.parse_long_note(line, position, kind, &code[1..3], following),
+            'h' | 's' => {
+                let (consumed, note, _) =
+                    self.parse_long_note(line, position, kind, &code[1..3], following, false)?;
+                Ok((consumed, note))
+            }
             'a' => self.parse_air(line, position, &code[1..3], &code[3..]),
             'H' | 'S' => {
                 self.parse_air_long(line, position, kind, &code[1..3], &code[3..], following)
@@ -498,12 +699,13 @@ impl Parser {
             value: "AIR long note without a parent note".to_owned(),
         })?;
         let properties = parse_air_properties(line, None, attributes)?;
-        let (consumed, note) = self.parse_long_note(
+        let (consumed, note, end_height) = self.parse_long_note(
             line,
             position,
             if kind == 'H' { 'h' } else { 's' },
             lane_code,
             following,
+            true,
         )?;
         let Some(note) = note else {
             return Ok((consumed, None));
@@ -517,7 +719,7 @@ impl Parser {
             ('S', NoteKind::Slide { points }) => NoteKind::AirSlide {
                 points: points.clone(),
                 properties,
-                end_height: None,
+                end_height,
                 parent,
             },
             _ => return Err(UgcError::MalformedRecord { line }),
@@ -534,10 +736,12 @@ impl Parser {
         kind: char,
         start_code: &str,
         following: &[&str],
-    ) -> Result<(usize, Option<Note>), UgcError> {
+        air: bool,
+    ) -> Result<(usize, Option<Note>, Option<f64>), UgcError> {
         let start_lane = parse_lane(line, start_code)?;
         let mut points = vec![SlidePoint::new(position, start_lane)];
         let mut consumed = 0;
+        let mut end_height = None;
         for follower in following {
             let follower = follower.trim();
             if follower.is_empty() || follower.starts_with('\'') {
@@ -573,6 +777,9 @@ impl Parser {
                     source,
                 })?;
             let lane = parse_lane(line + consumed + 1, &data[1..3])?;
+            if air && kind == 's' && data.len() > 3 {
+                end_height = Some(parse_air_height(line + consumed + 1, &data[3..])?);
+            }
             points.push(SlidePoint::new(endpoint, lane));
             consumed += 1;
         }
@@ -598,7 +805,7 @@ impl Parser {
             Note::new(position, start_lane, NoteKind::Slide { points })
         }
         .map_err(|source| UgcError::Chart { line, source })?;
-        Ok((consumed, Some(note)))
+        Ok((consumed, Some(note), end_height))
     }
 
     fn position(&self, line: usize, measure: u32, tick: u64) -> Result<Position, UgcError> {
@@ -709,7 +916,14 @@ fn parse_air_properties(
     if height_text.is_empty() {
         return Ok(properties);
     }
-    let raw = height_text.bytes().try_fold(0u32, |value, digit| {
+    let height = parse_air_height(line, height_text)?;
+    properties
+        .with_height(height)
+        .map_err(|source| UgcError::Chart { line, source })
+}
+
+fn parse_air_height(line: usize, text: &str) -> Result<f64, UgcError> {
+    let raw = text.bytes().try_fold(0u32, |value, digit| {
         let digit = match digit {
             b'0'..=b'9' => u32::from(digit - b'0'),
             b'a'..=b'z' => u32::from(digit - b'a' + 10),
@@ -720,16 +934,13 @@ fn parse_air_properties(
     });
     let raw = raw.ok_or_else(|| UgcError::InvalidValue {
         line,
-        value: height_text.to_owned(),
+        value: text.to_owned(),
     })?;
-    let height = if height_text.len() == 1 {
+    Ok(if text.len() == 1 {
         f64::from(raw) / 2.0 + 1.0
     } else {
-        f64::from(raw) / 10.0 + 1.0
-    };
-    properties
-        .with_height(height)
-        .map_err(|source| UgcError::Chart { line, source })
+        f64::from(raw) / 20.0 + 1.0
+    })
 }
 
 fn base36(line: usize, value: u8) -> Result<u8, UgcError> {
@@ -769,7 +980,7 @@ fn parse_u32(line: usize, value: &str) -> Result<u32, UgcError> {
 
 #[cfg(test)]
 mod tests {
-    use chart::{Chart, Lane, Note, NoteKind, Position, TapKind};
+    use chart::{Chart, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, TapKind};
 
     use super::{parse, write};
 
@@ -803,7 +1014,7 @@ mod tests {
 
     #[test]
     fn parses_ex_flick_and_air_notes_with_attributes() {
-        let source = "@ENDHEAD\n#0'0:x04U\n#0'0:f04L\n#0'0:a04UL2I\n";
+        let source = "@ENDHEAD\n#0'0:x04U\n#0'0:f04L\n#0'0:a04UL01I\n";
         let chart = parse(source).expect("valid extended UGC notes");
 
         assert_eq!(chart.notes().len(), 3);
@@ -823,7 +1034,7 @@ mod tests {
             chart.notes()[2].kind(),
             &NoteKind::Air {
                 properties: chart::AirProperties::new(chart::AirDirection::UpperLeft)
-                    .with_height(2.0)
+                    .with_height(1.05)
                     .unwrap()
                     .with_color(chart::AirColor::Inverted),
                 parent: chart::NoteId::new(1),
@@ -911,5 +1122,108 @@ mod tests {
 
         let ugc = write(&chart).expect("valid extended output");
         assert_eq!(parse(&ugc).unwrap().notes(), chart.notes());
+    }
+
+    #[test]
+    fn writes_air_mines_and_scroll_speed_records() {
+        let mut chart = Chart::new();
+        let position = Position::new(0, 1).unwrap();
+        let parent = chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::Tap(TapKind::Tap),
+            )
+            .unwrap(),
+        );
+        let air_properties = chart::AirProperties::new(chart::AirDirection::UpperLeft)
+            .with_height(1.05)
+            .unwrap()
+            .with_color(chart::AirColor::Inverted);
+        chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::Air {
+                    properties: air_properties,
+                    parent,
+                },
+            )
+            .unwrap(),
+        );
+        chart.add_note(Note::new(position, Lane::slider(4, 2).unwrap(), NoteKind::Mine).unwrap());
+        chart.add_scroll_speed_change(
+            ScrollSpeedChange::with_scope(position, 1.5, ScrollScope::Group(2)).unwrap(),
+        );
+        let grouped_note = chart.add_note(
+            Note::new(
+                Position::new(1, 1).unwrap(),
+                Lane::slider(8, 2).unwrap(),
+                NoteKind::Tap(TapKind::Tap),
+            )
+            .unwrap(),
+        );
+        chart.set_note_speed_group(grouped_note, Some(2)).unwrap();
+
+        let ugc = write(&chart).expect("valid extended UGC output");
+        let parsed = parse(&ugc).expect("round-tripped extended UGC output");
+        assert_eq!(parsed.notes(), chart.notes());
+        assert_eq!(parsed.scroll_speed_changes(), chart.scroll_speed_changes());
+        assert_eq!(
+            parsed.note_speed_group(chart::NoteId::new(3)).unwrap(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn writes_air_long_notes_and_round_trips_their_heights() {
+        let mut chart = Chart::new();
+        let parent = chart.add_note(
+            Note::new(
+                Position::new(0, 1).unwrap(),
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::Hold {
+                    end: Position::new(1, 1).unwrap(),
+                },
+            )
+            .unwrap(),
+        );
+        chart.add_note(
+            Note::new(
+                Position::new(0, 1).unwrap(),
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::AirHold {
+                    end: Position::new(1, 1).unwrap(),
+                    properties: chart::AirProperties::without_direction()
+                        .with_color(chart::AirColor::Inverted),
+                    parent,
+                },
+            )
+            .unwrap(),
+        );
+        let start = Position::new(1, 1).unwrap();
+        let end = Position::new(2, 1).unwrap();
+        chart.add_note(
+            Note::new(
+                start,
+                Lane::slider(4, 4).unwrap(),
+                NoteKind::AirSlide {
+                    points: vec![
+                        chart::SlidePoint::new(start, Lane::slider(4, 4).unwrap()),
+                        chart::SlidePoint::new(end, Lane::slider(8, 4).unwrap()),
+                    ],
+                    properties: chart::AirProperties::without_direction()
+                        .with_height(2.0)
+                        .unwrap(),
+                    end_height: Some(2.5),
+                    parent,
+                },
+            )
+            .unwrap(),
+        );
+
+        let ugc = write(&chart).expect("valid AIR long UGC output");
+        let parsed = parse(&ugc).expect("round-tripped AIR long UGC output");
+        assert_eq!(parsed.notes(), chart.notes());
     }
 }
