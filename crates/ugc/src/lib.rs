@@ -293,6 +293,11 @@ fn write_non_air_note(
         NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. } => {
             unreachable!("AIR notes are written by write_air_note")
         }
+        NoteKind::AirCrush { .. } => {
+            return Err(UgcError::UnsupportedNote {
+                note: "AIR Crush".to_owned(),
+            });
+        }
     };
     Ok(text)
 }
@@ -357,6 +362,9 @@ fn write_air_note(note: &Note, prefix: &str) -> Result<String, UgcError> {
                 end_height
             ))
         }
+        NoteKind::AirCrush { .. } => Err(UgcError::UnsupportedNote {
+            note: "AIR Crush".to_owned(),
+        }),
         _ => unreachable!("non-AIR note passed to write_air_note"),
     }
 }

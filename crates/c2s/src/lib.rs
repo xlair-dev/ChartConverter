@@ -139,6 +139,9 @@ fn write_note(
         ),
         NoteKind::Slide { points } => write_slide(points, None)?,
         NoteKind::ExSlide { points, direction } => write_slide(points, Some(*direction))?,
+        NoteKind::AirCrush { .. } => {
+            return Err(unsupported("AIR Crush is not supported yet"));
+        }
         NoteKind::Air { properties, parent } => format!(
             "{}\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}",
             encode_air_direction(

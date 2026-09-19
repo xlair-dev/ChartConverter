@@ -145,7 +145,10 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
                     note: "unsupported note kind".to_owned(),
                 });
             }
-            NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. } => {
+            NoteKind::Air { .. }
+            | NoteKind::AirHold { .. }
+            | NoteKind::AirSlide { .. }
+            | NoteKind::AirCrush { .. } => {
                 unreachable!("AIR notes are filtered before channel allocation");
             }
         }

@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::{AirColor, AirProperties, Lane, Note, NoteKind, SideButton, SlidePoint, TapKind};
-    use crate::{ExDirection, NoteId, Position};
+    use crate::{AirCrushPoint, ExDirection, NoteId, Position};
 
     #[test]
     fn rejects_a_hold_that_does_not_advance_in_time() {
@@ -126,6 +126,47 @@ mod tests {
                 end,
                 direction: ExDirection::Left,
             }
+        );
+    }
+
+    #[test]
+    fn validates_air_crush_points_and_interval() {
+        let start = Position::new(0, 1).expect("valid position");
+        let end = Position::new(1, 1).expect("valid position");
+        let lane = Lane::slider(0, 4).expect("valid lane");
+        let points = vec![
+            AirCrushPoint::new(start, lane, 5.0).expect("valid height"),
+            AirCrushPoint::new(end, Lane::slider(4, 4).expect("valid lane"), 6.0)
+                .expect("valid height"),
+        ];
+        let note = Note::new(
+            start,
+            lane,
+            NoteKind::AirCrush {
+                points,
+                color: AirColor::Normal,
+                interval: Some(Position::new(1, 4).unwrap()),
+                parent: NoteId::new(0),
+            },
+        )
+        .expect("valid Air Crush");
+
+        assert!(matches!(note.kind(), NoteKind::AirCrush { .. }));
+        assert!(
+            Note::new(
+                start,
+                lane,
+                NoteKind::AirCrush {
+                    points: vec![
+                        AirCrushPoint::new(start, lane, 5.0).unwrap(),
+                        AirCrushPoint::new(end, Lane::slider(4, 4).unwrap(), 6.0).unwrap(),
+                    ],
+                    color: AirColor::Normal,
+                    interval: Some(Position::new(0, 1).unwrap()),
+                    parent: NoteId::new(0),
+                },
+            )
+            .is_err()
         );
     }
 }
@@ -300,6 +341,13 @@ pub enum NoteKind {
         end_height: Option<f64>,
         parent: NoteId,
     },
+    AirCrush {
+        points: Vec<AirCrushPoint>,
+        color: AirColor,
+        /// `None` represents UGC's `$` interval, which keeps the combo at the start.
+        interval: Option<Position>,
+        parent: NoteId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -322,6 +370,19 @@ impl Note {
             }
             NoteKind::AirHold { end, .. } if *end <= position => {
                 return Err(ChartError::InvalidHoldEnd);
+            }
+            NoteKind::AirCrush {
+                points,
+                interval: Some(interval),
+                ..
+            } => {
+                if *interval == Position::new(0, 1).expect("valid position") {
+                    return Err(ChartError::InvalidAirCrushInterval);
+                }
+                validate_air_crush(position, lane, points)?;
+            }
+            NoteKind::AirCrush { points, .. } => {
+                validate_air_crush(position, lane, points)?;
             }
             _ => {}
         }
@@ -360,6 +421,62 @@ impl Note {
         points.push(point);
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AirCrushPoint {
+    position: Position,
+    lane: Lane,
+    height: f64,
+}
+
+impl AirCrushPoint {
+    pub fn new(position: Position, lane: Lane, height: f64) -> Result<Self, ChartError> {
+        if !height.is_finite() || height < 0.0 {
+            return Err(ChartError::InvalidAirHeight);
+        }
+        Ok(Self {
+            position,
+            lane,
+            height,
+        })
+    }
+
+    pub fn position(&self) -> Position {
+        self.position
+    }
+
+    pub fn lane(&self) -> Lane {
+        self.lane
+    }
+
+    pub fn height(&self) -> f64 {
+        self.height
+    }
+}
+
+fn validate_air_crush(
+    position: Position,
+    lane: Lane,
+    points: &[AirCrushPoint],
+) -> Result<(), ChartError> {
+    if points.len() < 2 {
+        return Err(ChartError::InvalidSlidePointCount);
+    }
+    if points[0].position() != position || points[0].lane() != lane {
+        return Err(ChartError::InvalidSlideStart);
+    }
+    if points.windows(2).any(|points| {
+        points[0].position() >= points[1].position()
+            || !points[0].height().is_finite()
+            || points[0].height() < 0.0
+    }) || points
+        .last()
+        .is_some_and(|point| !point.height().is_finite() || point.height() < 0.0)
+    {
+        return Err(ChartError::InvalidSlidePointOrder);
+    }
+    Ok(())
 }
 
 fn validate_slide(position: Position, lane: Lane, points: &[SlidePoint]) -> Result<(), ChartError> {
