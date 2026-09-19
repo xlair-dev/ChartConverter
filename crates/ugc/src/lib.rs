@@ -18,11 +18,157 @@ pub enum UgcError {
     Chart { line: usize, source: ChartError },
     #[error("line {line}: a note is missing a follower line")]
     MissingFollower { line: usize },
+    #[error("cannot represent `{note}` in the supported UGC output")]
+    UnsupportedNote { note: String },
+    #[error("position cannot be represented at the UGC resolution")]
+    UnrepresentablePosition,
 }
 
 /// Parses a UGC document into the shared chart model.
 pub fn parse(source: &str) -> Result<Chart, UgcError> {
     Parser::new().parse(source)
+}
+
+/// Writes the basic central-lane chart model as a fixed 4/4 UGC document.
+pub fn write(chart: &Chart) -> Result<String, UgcError> {
+    if !chart.scroll_speed_changes().is_empty() {
+        return Err(UgcError::UnsupportedNote {
+            note: "scroll speed changes".to_owned(),
+        });
+    }
+
+    let mut tempo_records = Vec::new();
+    for tempo in chart.tempo_changes() {
+        let (measure, tick) = output_position(tempo.position())?;
+        tempo_records.push((
+            measure,
+            tick,
+            format!("@BPM\t{measure}'{tick}\t{:.6}\n", tempo.bpm()),
+        ));
+    }
+
+    let mut note_records = Vec::new();
+    for note in chart.notes() {
+        note_records.push(write_note(note)?);
+    }
+    tempo_records.sort_by_key(|(measure, tick, _)| (*measure, *tick));
+    note_records.sort_by_key(|record| (record.measure, record.tick));
+
+    let mut output = String::from("@VER\t8\n@EXVER\t1\n@TICKS\t480\n@BEAT\t0\t4\t4\n");
+    for (_, _, text) in tempo_records {
+        output.push_str(&text);
+    }
+    output.push_str("@ENDHEAD\n");
+    for record in note_records {
+        output.push_str(&record.text);
+    }
+    Ok(output)
+}
+
+struct OutputRecord {
+    measure: u32,
+    tick: u64,
+    text: String,
+}
+
+fn write_note(note: &Note) -> Result<OutputRecord, UgcError> {
+    let (measure, tick) = output_position(note.position())?;
+    let (lane, width) = central_lane(note.lane())?;
+    let prefix = format!("#{measure}'{tick}:");
+    let text = match note.kind() {
+        NoteKind::Tap(kind) => {
+            let type_code = match kind {
+                TapKind::Tap => 't',
+                TapKind::XTap => 'x',
+                TapKind::Flick => 'f',
+            };
+            format!(
+                "{prefix}{type_code}{}{}\n",
+                encode_base36(lane),
+                encode_base36(width)
+            )
+        }
+        NoteKind::Hold { end } => {
+            let offset = relative_tick(note.position(), *end)?;
+            format!(
+                "{prefix}h{}{}\n#{}>s{}{}\n",
+                encode_base36(lane),
+                encode_base36(width),
+                offset,
+                encode_base36(lane),
+                encode_base36(width),
+            )
+        }
+        NoteKind::Slide { points } => {
+            let mut text = format!("{prefix}s{}{}\n", encode_base36(lane), encode_base36(width));
+            for point in points.iter().skip(1) {
+                let (point_lane, point_width) = central_lane(point.lane())?;
+                let offset = relative_tick(note.position(), point.position())?;
+                text.push_str(&format!(
+                    "#{}>s{}{}\n",
+                    offset,
+                    encode_base36(point_lane),
+                    encode_base36(point_width),
+                ));
+            }
+            text
+        }
+        NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. } => {
+            return Err(UgcError::UnsupportedNote {
+                note: "air".to_owned(),
+            });
+        }
+    };
+    Ok(OutputRecord {
+        measure,
+        tick,
+        text,
+    })
+}
+
+fn central_lane(lane: Lane) -> Result<(u8, u8), UgcError> {
+    match lane {
+        Lane::Slider { start, width } => Ok((start, width)),
+        Lane::Side(_) => Err(UgcError::UnsupportedNote {
+            note: "side lane".to_owned(),
+        }),
+    }
+}
+
+fn output_position(position: Position) -> Result<(u32, u64), UgcError> {
+    let absolute_ticks = u128::from(position.numerator()) * 480;
+    let denominator = u128::from(position.denominator());
+    if absolute_ticks % denominator != 0 {
+        return Err(UgcError::UnrepresentablePosition);
+    }
+    let absolute_ticks = absolute_ticks / denominator;
+    let measure = absolute_ticks / 1920;
+    let tick = absolute_ticks % 1920;
+    Ok((
+        u32::try_from(measure).map_err(|_| UgcError::UnrepresentablePosition)?,
+        u64::try_from(tick).map_err(|_| UgcError::UnrepresentablePosition)?,
+    ))
+}
+
+fn relative_tick(start: Position, end: Position) -> Result<u64, UgcError> {
+    let start = absolute_tick(start)?;
+    let end = absolute_tick(end)?;
+    end.checked_sub(start)
+        .ok_or(UgcError::UnrepresentablePosition)
+}
+
+fn absolute_tick(position: Position) -> Result<u64, UgcError> {
+    let ticks = u128::from(position.numerator()) * 480;
+    let denominator = u128::from(position.denominator());
+    if ticks % denominator != 0 {
+        return Err(UgcError::UnrepresentablePosition);
+    }
+    u64::try_from(ticks / denominator).map_err(|_| UgcError::UnrepresentablePosition)
+}
+
+fn encode_base36(value: u8) -> char {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    char::from(DIGITS[usize::from(value)])
 }
 
 struct Parser {
@@ -352,9 +498,9 @@ fn parse_u32(line: usize, value: &str) -> Result<u32, UgcError> {
 
 #[cfg(test)]
 mod tests {
-    use chart::{Lane, NoteKind, Position, TapKind};
+    use chart::{Chart, Lane, Note, NoteKind, Position, TapKind};
 
-    use super::parse;
+    use super::{parse, write};
 
     #[test]
     fn parses_ugc_timing_and_basic_notes() {
@@ -382,5 +528,27 @@ mod tests {
             parse(speed),
             Err(super::UgcError::UnsupportedRecord { .. })
         ));
+    }
+
+    #[test]
+    fn writes_basic_notes_and_round_trips_them() {
+        let mut chart = Chart::new();
+        let start = Position::new(1, 1).unwrap();
+        let end = Position::new(2, 1).unwrap();
+        chart.add_note(
+            Note::new(
+                start,
+                Lane::slider(10, 6).unwrap(),
+                NoteKind::Tap(TapKind::XTap),
+            )
+            .unwrap(),
+        );
+        chart.add_note(
+            Note::new(start, Lane::slider(0, 4).unwrap(), NoteKind::Hold { end }).unwrap(),
+        );
+
+        let ugc = write(&chart).expect("valid output");
+        assert!(ugc.contains("@ENDHEAD"));
+        assert_eq!(parse(&ugc).unwrap().notes(), chart.notes());
     }
 }
