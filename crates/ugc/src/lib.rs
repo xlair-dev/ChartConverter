@@ -870,7 +870,7 @@ impl Parser {
     }
 
     fn parse_note(
-        &self,
+        &mut self,
         line: usize,
         text: &str,
         following: &[&str],
@@ -918,6 +918,14 @@ impl Parser {
                 self.parse_air_long(line, position, kind, &code[1..3], &code[3..], following)
             }
             'C' => self.parse_air_crush(line, position, &code[1..3], &code[3..], following),
+            'T' => {
+                report_loss("UGC", "unsupported legacy T note was omitted");
+                let consumed = following
+                    .iter()
+                    .take_while(|follower| parse_follower(follower.trim()).is_some())
+                    .count();
+                Ok((consumed, None))
+            }
             'c' => Ok((0, None)),
             _ => Err(UgcError::UnsupportedRecord {
                 line,
@@ -960,7 +968,7 @@ impl Parser {
     }
 
     fn parse_air_crush(
-        &self,
+        &mut self,
         line: usize,
         position: Position,
         lane_code: &str,
@@ -1005,9 +1013,38 @@ impl Parser {
         let mut consumed = 0;
         for follower in following {
             let follower = follower.trim();
+            if follower.starts_with('@') {
+                self.parse_directive(line + consumed + 1, follower)?;
+                consumed += 1;
+                continue;
+            }
             let Some((offset, data)) = parse_follower(follower) else {
                 break;
             };
+            if data == "s" {
+                let endpoint =
+                    position
+                        .checked_add(Position::new(offset, self.ticks_per_beat).map_err(
+                            |source| UgcError::Chart {
+                                line: line + consumed + 1,
+                                source,
+                            },
+                        )?)
+                        .map_err(|source| UgcError::Chart {
+                            line: line + consumed + 1,
+                            source,
+                        })?;
+                points.push(
+                    AirCrushPoint::new(endpoint, lane, height).map_err(|source| {
+                        UgcError::Chart {
+                            line: line + consumed + 1,
+                            source,
+                        }
+                    })?,
+                );
+                consumed += 1;
+                continue;
+            }
             if data.len() < 4 {
                 return Err(UgcError::MalformedRecord {
                     line: line + consumed + 1,
@@ -1063,7 +1100,7 @@ impl Parser {
     }
 
     fn parse_air_long(
-        &self,
+        &mut self,
         line: usize,
         position: Position,
         kind: char,
@@ -1109,7 +1146,7 @@ impl Parser {
     }
 
     fn parse_long_note(
-        &self,
+        &mut self,
         line: usize,
         position: Position,
         kind: char,
@@ -1135,9 +1172,31 @@ impl Parser {
                 consumed += 1;
                 continue;
             }
+            if follower.starts_with('@') {
+                self.parse_directive(line + consumed + 1, follower)?;
+                consumed += 1;
+                continue;
+            }
             let Some((offset, data)) = parse_follower(follower) else {
                 break;
             };
+            if kind == 'h' && (data == "s" || data == "c") {
+                let endpoint =
+                    position
+                        .checked_add(Position::new(offset, self.ticks_per_beat).map_err(
+                            |source| UgcError::Chart {
+                                line: line + consumed + 1,
+                                source,
+                            },
+                        )?)
+                        .map_err(|source| UgcError::Chart {
+                            line: line + consumed + 1,
+                            source,
+                        })?;
+                points.push(SlidePoint::new(endpoint, start_lane));
+                consumed += 1;
+                continue;
+            }
             if data.len() < 3 {
                 return Err(UgcError::MalformedRecord {
                     line: line + consumed + 1,
@@ -1441,6 +1500,54 @@ mod tests {
         assert!(matches!(chart.notes()[1].kind(), NoteKind::Hold { .. }));
         assert!(matches!(chart.notes()[2].kind(), NoteKind::Slide { .. }));
         assert_eq!(chart.notes()[0].lane(), Lane::slider(0, 4).unwrap());
+    }
+
+    #[test]
+    fn parses_holds_with_implicit_end_lane() {
+        let chart = parse("@TICKS\t480\n@ENDHEAD\n#0'0:h04\n#480>s\n")
+            .expect("valid UGC hold with an implicit end lane");
+        assert!(matches!(
+            chart.notes()[0].kind(),
+            NoteKind::Hold { end } if *end == Position::new(1, 1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn parses_long_notes_with_directives_between_parent_and_follower() {
+        let chart = parse("@ENDHEAD\n#0'0:h04\n@USETIL\t1\n#480>s\n")
+            .expect("valid UGC long note with an intervening directive");
+
+        assert!(matches!(chart.notes()[0].kind(), NoteKind::Hold { .. }));
+    }
+
+    #[test]
+    fn parses_air_holds_with_an_implicit_action_end() {
+        let chart = parse("@ENDHEAD\n#0'0:t04\n#0'0:H04N\n#480>c\n")
+            .expect("valid UGC AIR-Hold with an implicit action end");
+
+        assert!(
+            matches!(chart.notes()[1].kind(), NoteKind::AirHold { end, .. } if *end == Position::new(1, 1).unwrap())
+        );
+    }
+
+    #[test]
+    fn parses_air_crush_followers_with_implicit_lane_and_height() {
+        let chart = parse("@TICKS\t480\n@ENDHEAD\n#0'0:t04\n#0'0:C0400\n#480>s\n#960>s048\n")
+            .expect("valid UGC AIR Crush with implicit follower data");
+
+        let NoteKind::AirCrush { points, .. } = chart.notes()[1].kind() else {
+            panic!("expected AIR Crush");
+        };
+        assert_eq!(points.len(), 3);
+    }
+
+    #[test]
+    fn omits_unsupported_legacy_t_notes() {
+        let chart = parse("@ENDHEAD\n#0'0:T0400\n#480>s04\n#0'0:t04\n")
+            .expect("unsupported legacy T notes are lossy but parseable");
+
+        assert_eq!(chart.notes().len(), 1);
+        assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::Tap));
     }
 
     #[test]
