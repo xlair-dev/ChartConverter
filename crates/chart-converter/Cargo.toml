@@ -1,0 +1,11 @@
+[package]
+name = "chart-converter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+c2s = { path = "../c2s" }
+chart = { path = "../chart" }
+sus = { path = "../sus" }
+thiserror.workspace = true
+ugc = { path = "../ugc" }
