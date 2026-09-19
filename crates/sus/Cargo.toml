@@ -1,0 +1,8 @@
+[package]
+name = "sus"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chart = { path = "../chart" }
+thiserror.workspace = true
