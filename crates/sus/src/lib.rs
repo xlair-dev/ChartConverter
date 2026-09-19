@@ -1,6 +1,6 @@
 //! Parser for the XLAIR-compatible subset of the SUS chart format.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chart::{
     Chart, ChartError, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton,
@@ -41,20 +41,30 @@ pub fn parse(source: &str) -> Result<Chart, SusError> {
 
 /// Writes a chart as an XLAIR-compatible SUS document.
 pub fn write(chart: &Chart) -> Result<String, SusError> {
-    if !chart.scroll_speed_changes().is_empty()
-        || chart.notes().iter().enumerate().any(|(index, _)| {
-            chart
-                .note_speed_group(chart::NoteId::new(index as u32))
-                .unwrap()
-                .is_some()
-        })
-    {
-        return Err(SusError::UnsupportedNote {
-            note: "scroll speed changes".to_owned(),
-        });
-    }
     let mut records = Vec::new();
     let mut bpm_definitions = Vec::new();
+    let mut speed_definitions = BTreeMap::<u32, Vec<(u32, u64, f64)>>::new();
+    for change in chart.scroll_speed_changes() {
+        if change.duration().is_some() {
+            return Err(SusError::UnsupportedNote {
+                note: "scroll speed duration".to_owned(),
+            });
+        }
+        let ScrollScope::Group(group) = change.scope() else {
+            return Err(SusError::UnsupportedNote {
+                note: "non-group scroll speed changes".to_owned(),
+            });
+        };
+        let group = speed_group(group)?;
+        let (measure, tick) = output_position(change.position())?;
+        speed_definitions
+            .entry(group)
+            .or_default()
+            .push((measure, tick, change.speed()));
+    }
+    for definitions in speed_definitions.values_mut() {
+        definitions.sort_by_key(|(measure, tick, _)| (*measure, *tick));
+    }
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {
         let (measure, tick) = output_position(tempo.position())?;
         let id = format!("{:02}", index + 1);
@@ -64,11 +74,12 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
             tick,
             key: "08".to_owned(),
             token: id,
+            speed_group: None,
         });
     }
 
     let mut channel_index = 0;
-    for note in chart.notes() {
+    for (note_index, note) in chart.notes().iter().enumerate() {
         if matches!(
             note.kind(),
             NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. }
@@ -77,6 +88,7 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
         }
         let channel = channel(channel_index)?;
         channel_index += 1;
+        let record_start = records.len();
         match note.kind() {
             NoteKind::Tap(kind) => {
                 let (measure, tick) = output_position(note.position())?;
@@ -91,12 +103,14 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
                         tick,
                         key: format!("1{}", base36_digit(start)),
                         token: format!("{token}{}", base36_digit(width)),
+                        speed_group: None,
                     }),
                     Lane::Side(button) if *kind == TapKind::Tap => records.push(Record {
                         measure,
                         tick,
                         key: format!("5{}", base36_digit(side_lane(button))),
                         token: format!("{}1", side_direction(button)),
+                        speed_group: None,
                     }),
                     Lane::Side(_) => {
                         return Err(SusError::UnsupportedNote {
@@ -130,6 +144,14 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
                 unreachable!("AIR notes are filtered before channel allocation");
             }
         }
+        let speed_group = chart
+            .note_speed_group(chart::NoteId::new(note_index as u32))
+            .map_err(|_| SusError::UnrepresentablePosition)?
+            .map(speed_group)
+            .transpose()?;
+        for record in &mut records[record_start..] {
+            record.speed_group = speed_group;
+        }
     }
 
     records.sort_by_key(|record| (record.measure, record.tick, record.key.clone()));
@@ -137,7 +159,26 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
     for definition in bpm_definitions {
         output.push_str(&definition);
     }
+    for (group, definitions) in speed_definitions {
+        let definitions = definitions
+            .into_iter()
+            .map(|(measure, tick, speed)| format!("{measure}'{tick}:{speed}"))
+            .collect::<Vec<_>>();
+        output.push_str(&format!(
+            "#TIL{}: \"{}\"\n",
+            speed_group_text(group),
+            definitions.join(",")
+        ));
+    }
+    let mut current_speed_group = None;
     for record in records {
+        if record.speed_group != current_speed_group {
+            match record.speed_group {
+                Some(group) => output.push_str(&format!("#HISPEED {}\n", speed_group_text(group))),
+                None => output.push_str("#NOSPEED\n"),
+            }
+            current_speed_group = record.speed_group;
+        }
         output.push_str(&format_record(&record)?);
     }
     Ok(output)
@@ -148,6 +189,7 @@ struct Record {
     tick: u64,
     key: String,
     token: String,
+    speed_group: Option<u32>,
 }
 
 fn add_hold_records(
@@ -165,12 +207,14 @@ fn add_hold_records(
         tick: start_tick,
         key: format!("3{}{channel}", base36_digit(lane)),
         token: format!("1{}", base36_digit(width)),
+        speed_group: None,
     });
     records.push(Record {
         measure: end_measure,
         tick: end_tick,
         key: format!("3{}{channel}", base36_digit(lane)),
         token: format!("2{}", base36_digit(width)),
+        speed_group: None,
     });
     Ok(())
 }
@@ -190,12 +234,14 @@ fn add_side_hold_records(
         tick: start_tick,
         key: format!("2{}{channel}", base36_digit(lane)),
         token: "11".to_owned(),
+        speed_group: None,
     });
     records.push(Record {
         measure: end_measure,
         tick: end_tick,
         key: format!("2{}{channel}", base36_digit(lane)),
         token: "21".to_owned(),
+        speed_group: None,
     });
     Ok(())
 }
@@ -220,6 +266,7 @@ fn add_slide_records(
             tick,
             key: format!("3{}{channel}", base36_digit(lane)),
             token: format!("{kind}{}", base36_digit(lane_width(point.lane())?)),
+            speed_group: None,
         });
     }
     Ok(())
@@ -285,6 +332,21 @@ fn lane_width(lane: Lane) -> Result<u8, SusError> {
 fn base36_digit(value: u8) -> char {
     const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     char::from(DIGITS[usize::from(value)])
+}
+
+fn speed_group(group: u32) -> Result<u32, SusError> {
+    if group < 36 * 36 {
+        Ok(group)
+    } else {
+        Err(SusError::UnrepresentablePosition)
+    }
+}
+
+fn speed_group_text(group: u32) -> String {
+    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let high = digits[(group / 36) as usize] as char;
+    let low = digits[(group % 36) as usize] as char;
+    format!("{high}{low}")
 }
 
 struct Parser {
@@ -436,13 +498,7 @@ impl Parser {
                 line,
                 value: speed.to_owned(),
             })?;
-            let denominator = self
-                .ticks_per_beat
-                .checked_mul(4)
-                .ok_or(SusError::InvalidValue {
-                    line,
-                    value: self.ticks_per_beat.to_string(),
-                })?;
+            let denominator = self.ticks_per_beat;
             let position = self
                 .timeline
                 .position(measure, tick, denominator)
@@ -826,7 +882,10 @@ fn parse_position(value: &str) -> Result<Position, ()> {
 
 #[cfg(test)]
 mod tests {
-    use chart::{Chart, Lane, Note, NoteKind, Position, SideButton, TapKind, TempoChange};
+    use chart::{
+        Chart, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton, TapKind,
+        TempoChange,
+    };
 
     use super::{parse, write};
 
@@ -926,6 +985,56 @@ mod tests {
         assert!(sus.contains("#00008:"));
         assert!(sus.contains("#0001a:"));
         assert_eq!(parse(&sus).unwrap().notes(), chart.notes());
+    }
+
+    #[test]
+    fn writes_speed_definitions_and_note_speed_groups() {
+        let position = Position::new(1, 1).unwrap();
+        let mut chart = Chart::new();
+        chart.add_scroll_speed_change(
+            ScrollSpeedChange::with_scope(position, 1.5, ScrollScope::Group(35))
+                .expect("valid speed change"),
+        );
+        let note_id = chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::Tap(TapKind::Tap),
+            )
+            .expect("valid note"),
+        );
+        chart
+            .set_note_speed_group(note_id, Some(35))
+            .expect("valid note id");
+
+        let sus = write(&chart).expect("valid speed output");
+        assert!(sus.contains("#TIL0z: \"0'96:1.5\""));
+        assert!(sus.contains("#HISPEED 0z"));
+        let parsed = parse(&sus).expect("round-tripped speed output");
+        assert_eq!(parsed.scroll_speed_changes(), chart.scroll_speed_changes());
+        assert_eq!(parsed.note_speed_group(note_id).unwrap(), Some(35));
+    }
+
+    #[test]
+    fn rejects_speed_changes_that_sus_cannot_represent() {
+        let mut chart = Chart::new();
+        chart.add_scroll_speed_change(
+            ScrollSpeedChange::with_duration(
+                Position::new(0, 1).unwrap(),
+                1.0,
+                ScrollScope::Group(0),
+                Position::new(1, 4).unwrap(),
+            )
+            .expect("valid speed duration"),
+        );
+
+        let error = write(&chart).expect_err("duration is unsupported by SUS");
+        assert_eq!(
+            error,
+            super::SusError::UnsupportedNote {
+                note: "scroll speed duration".to_owned(),
+            }
+        );
     }
 
     #[test]
