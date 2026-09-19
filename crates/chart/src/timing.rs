@@ -69,6 +69,7 @@ pub struct ScrollSpeedChange {
     position: Position,
     speed: f64,
     scope: ScrollScope,
+    duration: Option<Position>,
 }
 
 impl ScrollSpeedChange {
@@ -88,7 +89,22 @@ impl ScrollSpeedChange {
             position,
             speed,
             scope,
+            duration: None,
         })
+    }
+
+    pub fn with_duration(
+        position: Position,
+        speed: f64,
+        scope: ScrollScope,
+        duration: Position,
+    ) -> Result<Self, ChartError> {
+        if duration == Position::new(0, 1).expect("valid position") {
+            return Err(ChartError::InvalidScrollSpeedDuration);
+        }
+        let mut change = Self::with_scope(position, speed, scope)?;
+        change.duration = Some(duration);
+        Ok(change)
     }
 
     pub fn position(&self) -> Position {
@@ -101,5 +117,9 @@ impl ScrollSpeedChange {
 
     pub fn scope(&self) -> ScrollScope {
         self.scope
+    }
+
+    pub fn duration(&self) -> Option<Position> {
+        self.duration
     }
 }

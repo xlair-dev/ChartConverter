@@ -24,6 +24,8 @@ pub enum ChartError {
     InvalidTempo,
     #[error("scroll speed must be finite")]
     InvalidScrollSpeed,
+    #[error("scroll speed duration must be greater than zero")]
+    InvalidScrollSpeedDuration,
     #[error("air height must be finite and non-negative")]
     InvalidAirHeight,
     #[error("note id does not refer to a note in the chart")]
