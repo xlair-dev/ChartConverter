@@ -132,6 +132,11 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
                     add_side_hold_records(&mut records, note.position(), *end, button, channel)?
                 }
             },
+            NoteKind::ExHold { .. } | NoteKind::ExSlide { .. } => {
+                return Err(SusError::UnsupportedNote {
+                    note: "ExLong".to_owned(),
+                });
+            }
             NoteKind::Slide { points } => {
                 add_slide_records(&mut records, points, channel)?;
             }
