@@ -311,6 +311,21 @@ impl Note {
     pub fn kind(&self) -> &NoteKind {
         &self.kind
     }
+
+    /// Appends a point to a slide while preserving its temporal invariants.
+    pub fn append_slide_point(&mut self, point: SlidePoint) -> Result<(), ChartError> {
+        let NoteKind::Slide { points } = &mut self.kind else {
+            return Err(ChartError::InvalidSlidePointCount);
+        };
+        if points
+            .last()
+            .is_some_and(|last| last.position() >= point.position())
+        {
+            return Err(ChartError::InvalidSlidePointOrder);
+        }
+        points.push(point);
+        Ok(())
+    }
 }
 
 fn validate_slide(position: Position, lane: Lane, points: &[SlidePoint]) -> Result<(), ChartError> {

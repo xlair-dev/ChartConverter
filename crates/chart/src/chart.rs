@@ -1,6 +1,6 @@
 use crate::{
     error::ChartError,
-    note::Note,
+    note::{Note, SlidePoint},
     timing::{ScrollSpeedChange, TempoChange},
 };
 
@@ -81,6 +81,17 @@ impl Chart {
         self.notes
             .get(note_id.value() as usize)
             .ok_or(ChartError::InvalidNoteId)
+    }
+
+    pub fn append_slide_point(
+        &mut self,
+        note_id: NoteId,
+        point: SlidePoint,
+    ) -> Result<(), ChartError> {
+        self.notes
+            .get_mut(note_id.value() as usize)
+            .ok_or(ChartError::InvalidNoteId)?
+            .append_slide_point(point)
     }
 
     pub fn set_note_speed_group(
