@@ -1,0 +1,21 @@
+{
+	"extends": [
+		"config:recommended",
+		"docker:pinDigests",
+		"helpers:pinGitHubActionDigests",
+		":maintainLockFilesWeekly"
+	],
+	"packageRules": [
+		{
+			"matchUpdateTypes": [
+				"minor",
+				"patch",
+				"pin",
+				"pinDigest",
+				"digest",
+				"lockFileMaintenance"
+			],
+			"automerge": true
+		}
+	]
+}
