@@ -82,7 +82,10 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
     for (note_index, note) in chart.notes().iter().enumerate() {
         if matches!(
             note.kind(),
-            NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. }
+            NoteKind::Air { .. }
+                | NoteKind::AirHold { .. }
+                | NoteKind::AirSlide { .. }
+                | NoteKind::AirCrush { .. }
         ) {
             continue;
         }
@@ -891,8 +894,8 @@ fn parse_position(value: &str) -> Result<Position, ()> {
 #[cfg(test)]
 mod tests {
     use chart::{
-        Chart, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton, TapKind,
-        TempoChange,
+        AirCrushColor, AirCrushPoint, Chart, Lane, Note, NoteKind, Position, ScrollScope,
+        ScrollSpeedChange, SideButton, TapKind, TempoChange,
     };
 
     use super::{parse, write};
@@ -1102,6 +1105,27 @@ mod tests {
                 Lane::slider(0, 4).unwrap(),
                 NoteKind::Air {
                     properties: chart::AirProperties::new(chart::AirDirection::Up),
+                    parent,
+                },
+            )
+            .unwrap(),
+        );
+        chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::AirCrush {
+                    points: vec![
+                        AirCrushPoint::new(position, Lane::slider(0, 4).unwrap(), 5.0).unwrap(),
+                        AirCrushPoint::new(
+                            Position::new(1, 1).unwrap(),
+                            Lane::slider(4, 4).unwrap(),
+                            6.0,
+                        )
+                        .unwrap(),
+                    ],
+                    color: AirCrushColor::Normal,
+                    interval: None,
                     parent,
                 },
             )
