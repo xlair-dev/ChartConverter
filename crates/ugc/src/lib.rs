@@ -517,6 +517,7 @@ impl Parser {
             ('S', NoteKind::Slide { points }) => NoteKind::AirSlide {
                 points: points.clone(),
                 properties,
+                end_height: None,
                 parent,
             },
             _ => return Err(UgcError::MalformedRecord { line }),

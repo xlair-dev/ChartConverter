@@ -31,6 +31,8 @@ struct Parser {
     chart: Chart,
     last_ex_parent: Option<NoteId>,
     last_air_direction: Option<AirDirection>,
+    last_hold_parent: Option<NoteId>,
+    last_slide_parent: Option<NoteId>,
 }
 
 impl Parser {
@@ -41,6 +43,8 @@ impl Parser {
             chart: Chart::new(),
             last_ex_parent: None,
             last_air_direction: None,
+            last_hold_parent: None,
+            last_slide_parent: None,
         }
     }
 
@@ -62,8 +66,10 @@ impl Parser {
                 "AIR" => self.parse_air(line, &fields)?,
                 "HLD" => self.parse_hold(line, &fields)?,
                 "SLD" => self.parse_slide(line, &fields)?,
+                "AHD" => self.parse_air_hold(line, &fields)?,
+                "ASD" => self.parse_air_slide(line, &fields)?,
                 "SFL" | "SLP" => self.parse_scroll_speed(line, &fields)?,
-                "AHD" | "SXD" | "SLC" | "SXC" | "ALD" => {
+                "AHX" | "SXD" | "SLC" | "SXC" | "ALD" => {
                     return Err(C2sError::UnsupportedRecord {
                         line,
                         record: fields[0].to_owned(),
@@ -272,8 +278,9 @@ impl Parser {
                 value: duration.to_string(),
             })?,
         )?;
-        self.add_note(line, Note::new(start, lane, NoteKind::Hold { end }))
-            .map(|_| ())
+        let id = self.add_note(line, Note::new(start, lane, NoteKind::Hold { end }))?;
+        self.last_hold_parent = Some(id);
+        Ok(())
     }
 
     fn parse_slide(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
@@ -305,11 +312,162 @@ impl Parser {
             SlidePoint::new(start, start_lane),
             SlidePoint::new(end, end_lane),
         ];
-        self.add_note(
+        let id = self.add_note(
             line,
             Note::new(start, start_lane, NoteKind::Slide { points }),
-        )
-        .map(|_| ())
+        )?;
+        self.last_slide_parent = Some(id);
+        Ok(())
+    }
+
+    fn parse_air_hold(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+        let (measure, tick) = self.location(line, fields)?;
+        let lane = self.lane(
+            line,
+            fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
+            fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let parent = self.parent_hold(line, fields.get(5))?;
+        let duration = parse_u64(
+            line,
+            fields.get(6).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let color = parse_air_color(
+            line,
+            fields.get(7).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let start = self.position(line, measure, tick)?;
+        let end = self.position(
+            line,
+            measure,
+            tick.checked_add(duration).ok_or(C2sError::InvalidValue {
+                line,
+                value: duration.to_string(),
+            })?,
+        )?;
+        let properties = AirProperties::without_direction().with_color(color);
+        self.add_note(
+            line,
+            Note::new(
+                start,
+                lane,
+                NoteKind::AirHold {
+                    end,
+                    properties,
+                    parent,
+                },
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn parse_air_slide(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+        let (measure, tick) = self.location(line, fields)?;
+        let start_lane = self.lane(
+            line,
+            fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
+            fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let parent = self.parent_slide(line, fields.get(5))?;
+        let height = fields
+            .get(6)
+            .ok_or(C2sError::MalformedRecord { line })?
+            .parse::<f64>()
+            .map_err(|_| C2sError::InvalidValue {
+                line,
+                value: fields[6].to_owned(),
+            })?;
+        let duration = parse_u64(
+            line,
+            fields.get(7).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let end_lane = self.lane(
+            line,
+            fields.get(8).ok_or(C2sError::MalformedRecord { line })?,
+            fields.get(9).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let end_height = fields
+            .get(10)
+            .ok_or(C2sError::MalformedRecord { line })?
+            .parse::<f64>()
+            .map_err(|_| C2sError::InvalidValue {
+                line,
+                value: fields[10].to_owned(),
+            })?;
+        if !end_height.is_finite() || end_height < 0.0 {
+            return Err(C2sError::Chart {
+                line,
+                source: ChartError::InvalidAirHeight,
+            });
+        }
+        let color = parse_air_color(
+            line,
+            fields.get(11).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let start = self.position(line, measure, tick)?;
+        let end = self.position(
+            line,
+            measure,
+            tick.checked_add(duration).ok_or(C2sError::InvalidValue {
+                line,
+                value: duration.to_string(),
+            })?,
+        )?;
+        let properties = AirProperties::without_direction()
+            .with_height(height)
+            .map_err(|source| C2sError::Chart { line, source })?
+            .with_color(color);
+        let points = vec![
+            SlidePoint::new(start, start_lane),
+            SlidePoint::new(end, end_lane),
+        ];
+        let end_height = Some(end_height);
+        self.add_note(
+            line,
+            Note::new(
+                start,
+                start_lane,
+                NoteKind::AirSlide {
+                    points,
+                    properties,
+                    end_height,
+                    parent,
+                },
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn parent_hold(&self, line: usize, value: Option<&&str>) -> Result<NoteId, C2sError> {
+        match value.ok_or(C2sError::MalformedRecord { line })? {
+            &"HLD" => self.last_hold_parent,
+            target => {
+                return Err(C2sError::InvalidValue {
+                    line,
+                    value: (*target).to_owned(),
+                });
+            }
+        }
+        .ok_or(C2sError::InvalidValue {
+            line,
+            value: "AIR hold without a parent".to_owned(),
+        })
+    }
+
+    fn parent_slide(&self, line: usize, value: Option<&&str>) -> Result<NoteId, C2sError> {
+        match value.ok_or(C2sError::MalformedRecord { line })? {
+            &"SLD" => self.last_slide_parent,
+            target => {
+                return Err(C2sError::InvalidValue {
+                    line,
+                    value: (*target).to_owned(),
+                });
+            }
+        }
+        .ok_or(C2sError::InvalidValue {
+            line,
+            value: "AIR slide without a parent".to_owned(),
+        })
     }
 
     fn location(&self, line: usize, fields: &[&str]) -> Result<(u32, u64), C2sError> {
@@ -389,6 +547,17 @@ fn air_direction_from_ex(line: usize, direction: ExDirection) -> Result<AirDirec
     }
 }
 
+fn parse_air_color(line: usize, value: &str) -> Result<chart::AirColor, C2sError> {
+    match value {
+        "DEF" => Ok(chart::AirColor::Normal),
+        "GRN" | "PPL" => Ok(chart::AirColor::Inverted),
+        _ => Err(C2sError::InvalidValue {
+            line,
+            value: value.to_owned(),
+        }),
+    }
+}
+
 fn parse_u64(line: usize, value: &str) -> Result<u64, C2sError> {
     value.parse().map_err(|_| C2sError::InvalidValue {
         line,
@@ -450,6 +619,26 @@ mod tests {
             chart.scroll_speed_changes()[1].scope(),
             chart::ScrollScope::Group(3)
         );
+    }
+
+    #[test]
+    fn parses_air_hold_and_slide_with_explicit_parents() {
+        let source = "RESOLUTION\t384\nHLD\t0\t0\t0\t4\t96\nAHD\t0\t96\t0\t4\tHLD\t96\tDEF\nSLD\t1\t0\t0\t4\t96\t4\t4\nASD\t1\t96\t4\t4\tSLD\t2.0\t96\t8\t4\t2.5\tDEF\n";
+        let chart = parse(source).expect("valid AIR long notes");
+
+        assert!(matches!(
+            chart.notes()[1].kind(),
+            NoteKind::AirHold { parent, .. } if *parent == chart::NoteId::new(0)
+        ));
+        assert!(matches!(
+            chart.notes()[3].kind(),
+            NoteKind::AirSlide {
+                parent,
+                properties,
+                end_height: Some(2.5),
+                ..
+            } if *parent == chart::NoteId::new(2) && properties.height() == Some(2.0)
+        ));
     }
 
     #[test]
