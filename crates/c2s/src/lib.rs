@@ -509,7 +509,7 @@ impl Parser {
                 "SLD" | "SLC" => self.parse_slide(line, &fields, None)?,
                 "SXD" | "SXC" => self.parse_slide(line, &fields, Some(8))?,
                 "AHD" | "AHX" => self.parse_air_hold(line, &fields)?,
-                "ASD" => self.parse_air_slide(line, &fields)?,
+                "ASC" | "ASD" => self.parse_air_slide(line, &fields)?,
                 "SLA" => self.parse_speed_assignment(line, &fields)?,
                 "SFL" | "SLP" => self.parse_scroll_speed(line, &fields)?,
                 "ALD" => self.parse_air_crush(line, &fields)?,
@@ -1351,6 +1351,18 @@ mod tests {
                 && points[0].height() == 2.0
                 && points[1].height() == 2.5
         ));
+    }
+
+    #[test]
+    fn parses_air_slide_control_records() {
+        let source = "RESOLUTION\t384\nSLD\t0\t0\t0\t4\t96\t4\t4\nASC\t0\t96\t4\t4\tSLD\t2.0\t96\t8\t4\t2.5\tDEF\nASC\t0\t192\t8\t4\tASC\t2.5\t96\t12\t4\t3.0\tDEF\n";
+        let chart = parse(source).expect("valid C2S AIR Slide control records");
+
+        assert_eq!(chart.notes().len(), 2);
+        let NoteKind::AirSlide { points, .. } = chart.notes()[1].kind() else {
+            panic!("expected AIR Slide");
+        };
+        assert_eq!(points.len(), 3);
     }
 
     #[test]
