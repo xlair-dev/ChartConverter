@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use chart::{
     Chart, ChartError, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton,
-    SlidePoint, SlidePointKind, TapKind, TempoChange,
+    SlidePoint, SlidePointKind, TapKind, TempoChange, report_loss,
 };
 use thiserror::Error;
 
@@ -40,42 +40,56 @@ pub fn parse(source: &str) -> Result<Chart, SusError> {
 }
 
 /// Writes a chart as an XLAIR-compatible SUS document.
+///
+/// Unsupported or unrepresentable chart information is omitted and reported to stdout.
 pub fn write(chart: &Chart) -> Result<String, SusError> {
     let mut records = Vec::new();
     let mut bpm_definitions = Vec::new();
     let mut speed_definitions = BTreeMap::<u32, Vec<(u32, u64, f64)>>::new();
     for change in chart.scroll_speed_changes() {
-        if change.duration().is_some() {
-            return Err(SusError::UnsupportedNote {
-                note: "scroll speed duration".to_owned(),
-            });
+        let definition = (|| {
+            if change.duration().is_some() {
+                return Err(SusError::UnsupportedNote {
+                    note: "scroll speed duration".to_owned(),
+                });
+            }
+            let ScrollScope::Group(group) = change.scope() else {
+                return Err(SusError::UnsupportedNote {
+                    note: "non-group scroll speed changes".to_owned(),
+                });
+            };
+            let group = speed_group(group)?;
+            let (measure, tick) = output_position(change.position())?;
+            Ok((group, measure, tick, change.speed()))
+        })();
+        match definition {
+            Ok((group, measure, tick, speed)) => speed_definitions
+                .entry(group)
+                .or_default()
+                .push((measure, tick, speed)),
+            Err(error) if is_loss(&error) => report_loss("SUS", error),
+            Err(error) => return Err(error),
         }
-        let ScrollScope::Group(group) = change.scope() else {
-            return Err(SusError::UnsupportedNote {
-                note: "non-group scroll speed changes".to_owned(),
-            });
-        };
-        let group = speed_group(group)?;
-        let (measure, tick) = output_position(change.position())?;
-        speed_definitions
-            .entry(group)
-            .or_default()
-            .push((measure, tick, change.speed()));
     }
     for definitions in speed_definitions.values_mut() {
         definitions.sort_by_key(|(measure, tick, _)| (*measure, *tick));
     }
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {
-        let (measure, tick) = output_position(tempo.position())?;
-        let id = format!("{:02}", index + 1);
-        bpm_definitions.push(format!("#BPM{id}: {}\n", tempo.bpm()));
-        records.push(Record {
-            measure,
-            tick,
-            key: "08".to_owned(),
-            token: id,
-            speed_group: None,
-        });
+        match output_position(tempo.position()) {
+            Ok((measure, tick)) => {
+                let id = format!("{:02}", index + 1);
+                bpm_definitions.push(format!("#BPM{id}: {}\n", tempo.bpm()));
+                records.push(Record {
+                    measure,
+                    tick,
+                    key: "08".to_owned(),
+                    token: id,
+                    speed_group: None,
+                });
+            }
+            Err(error) if is_loss(&error) => report_loss("SUS", error),
+            Err(error) => return Err(error),
+        }
     }
 
     let mut channel_index = 0;
@@ -87,81 +101,114 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
                 | NoteKind::AirSlide { .. }
                 | NoteKind::AirCrush { .. }
         ) {
+            report_loss("SUS", "AIR notation");
             continue;
         }
-        let channel = channel(channel_index)?;
-        channel_index += 1;
+        let channel = match channel(channel_index) {
+            Ok(channel) => channel,
+            Err(error) if is_loss(&error) => {
+                report_loss("SUS", error);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let record_start = records.len();
-        match note.kind() {
-            NoteKind::Tap(kind) => {
-                let (measure, tick) = output_position(note.position())?;
-                let token = match kind {
-                    TapKind::Tap => '1',
-                    TapKind::XTap => '2',
-                    TapKind::Flick { .. } => '3',
-                };
-                match note.lane() {
-                    Lane::Slider { start, width } => records.push(Record {
-                        measure,
-                        tick,
-                        key: format!("1{}", base36_digit(start)),
-                        token: format!("{token}{}", base36_digit(width)),
-                        speed_group: None,
-                    }),
-                    Lane::Side(button) if *kind == TapKind::Tap => records.push(Record {
-                        measure,
-                        tick,
-                        key: format!("5{}", base36_digit(side_lane(button))),
-                        token: format!("{}1", side_direction(button)),
-                        speed_group: None,
-                    }),
-                    Lane::Side(_) => {
-                        return Err(SusError::UnsupportedNote {
-                            note: "side ExTap/Flick".to_owned(),
-                        });
+        let result = (|| {
+            match note.kind() {
+                NoteKind::Tap(kind) => {
+                    let (measure, tick) = output_position(note.position())?;
+                    let token = match kind {
+                        TapKind::Tap => '1',
+                        TapKind::XTap => '2',
+                        TapKind::Flick { .. } => '3',
+                    };
+                    match note.lane() {
+                        Lane::Slider { start, width } => records.push(Record {
+                            measure,
+                            tick,
+                            key: format!("1{}", base36_digit(start)),
+                            token: format!("{token}{}", base36_digit(width)),
+                            speed_group: None,
+                        }),
+                        Lane::Side(button) if *kind == TapKind::Tap => records.push(Record {
+                            measure,
+                            tick,
+                            key: format!("5{}", base36_digit(side_lane(button))),
+                            token: format!("{}1", side_direction(button)),
+                            speed_group: None,
+                        }),
+                        Lane::Side(_) => {
+                            return Err(SusError::UnsupportedNote {
+                                note: "side ExTap/Flick".to_owned(),
+                            });
+                        }
                     }
                 }
-            }
-            NoteKind::ExTap { .. } => {
-                return Err(SusError::UnsupportedNote {
-                    note: "ExTap".to_owned(),
-                });
-            }
-            NoteKind::Hold { end } => match note.lane() {
-                Lane::Slider { start, width } => {
-                    add_hold_records(&mut records, note.position(), *end, start, width, channel)?
+                NoteKind::ExTap { .. } => {
+                    return Err(SusError::UnsupportedNote {
+                        note: "ExTap".to_owned(),
+                    });
                 }
-                Lane::Side(button) => {
-                    add_side_hold_records(&mut records, note.position(), *end, button, channel)?
+                NoteKind::Hold { end } => match note.lane() {
+                    Lane::Slider { start, width } => add_hold_records(
+                        &mut records,
+                        note.position(),
+                        *end,
+                        start,
+                        width,
+                        channel,
+                    )?,
+                    Lane::Side(button) => {
+                        add_side_hold_records(&mut records, note.position(), *end, button, channel)?
+                    }
+                },
+                NoteKind::ExHold { .. } | NoteKind::ExSlide { .. } => {
+                    return Err(SusError::UnsupportedNote {
+                        note: "ExLong".to_owned(),
+                    });
                 }
-            },
-            NoteKind::ExHold { .. } | NoteKind::ExSlide { .. } => {
-                return Err(SusError::UnsupportedNote {
-                    note: "ExLong".to_owned(),
-                });
+                NoteKind::Slide { points } => {
+                    add_slide_records(&mut records, points, channel)?;
+                }
+                NoteKind::Mine => {
+                    return Err(SusError::UnsupportedNote {
+                        note: "unsupported note kind".to_owned(),
+                    });
+                }
+                NoteKind::Air { .. }
+                | NoteKind::AirHold { .. }
+                | NoteKind::AirSlide { .. }
+                | NoteKind::AirCrush { .. } => {
+                    unreachable!("AIR notes are filtered before channel allocation");
+                }
             }
-            NoteKind::Slide { points } => {
-                add_slide_records(&mut records, points, channel)?;
+            let speed_group = chart
+                .note_speed_group(chart::NoteId::new(note_index as u32))
+                .map_err(|_| SusError::UnrepresentablePosition)?
+                .map(speed_group)
+                .transpose()?;
+            let speed_group = match speed_group {
+                Some(group) if !speed_definitions.contains_key(&group) => {
+                    report_loss("SUS", format!("note speed group {group}"));
+                    None
+                }
+                speed_group => speed_group,
+            };
+            for record in &mut records[record_start..] {
+                record.speed_group = speed_group;
             }
-            NoteKind::Mine => {
-                return Err(SusError::UnsupportedNote {
-                    note: "unsupported note kind".to_owned(),
-                });
+            Ok::<(), SusError>(())
+        })();
+        match result {
+            Ok(()) => {}
+            Err(error) if is_loss(&error) => {
+                records.truncate(record_start);
+                report_loss("SUS", error);
             }
-            NoteKind::Air { .. }
-            | NoteKind::AirHold { .. }
-            | NoteKind::AirSlide { .. }
-            | NoteKind::AirCrush { .. } => {
-                unreachable!("AIR notes are filtered before channel allocation");
-            }
+            Err(error) => return Err(error),
         }
-        let speed_group = chart
-            .note_speed_group(chart::NoteId::new(note_index as u32))
-            .map_err(|_| SusError::UnrepresentablePosition)?
-            .map(speed_group)
-            .transpose()?;
-        for record in &mut records[record_start..] {
-            record.speed_group = speed_group;
+        if records.len() > record_start {
+            channel_index += 1;
         }
     }
 
@@ -183,6 +230,14 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
     }
     let mut current_speed_group = None;
     for record in records {
+        let text = match format_record(&record) {
+            Ok(text) => text,
+            Err(error) if is_loss(&error) => {
+                report_loss("SUS", error);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if record.speed_group != current_speed_group {
             match record.speed_group {
                 Some(group) => output.push_str(&format!("#HISPEED {}\n", speed_group_text(group))),
@@ -190,7 +245,7 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
             }
             current_speed_group = record.speed_group;
         }
-        output.push_str(&format_record(&record)?);
+        output.push_str(&text);
     }
     Ok(output)
 }
@@ -324,6 +379,13 @@ fn channel(index: usize) -> Result<char, SusError> {
         .copied()
         .map(char::from)
         .ok_or(SusError::UnrepresentablePosition)
+}
+
+fn is_loss(error: &SusError) -> bool {
+    matches!(
+        error,
+        SusError::UnsupportedNote { .. } | SusError::UnrepresentablePosition
+    )
 }
 
 fn central_lane(lane: Lane, note: &str) -> Result<u8, SusError> {
@@ -1068,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_speed_changes_that_sus_cannot_represent() {
+    fn omits_speed_changes_that_sus_cannot_represent() {
         let mut chart = Chart::new();
         chart.add_scroll_speed_change(
             ScrollSpeedChange::with_duration(
@@ -1080,13 +1142,8 @@ mod tests {
             .expect("valid speed duration"),
         );
 
-        let error = write(&chart).expect_err("duration is unsupported by SUS");
-        assert_eq!(
-            error,
-            super::SusError::UnsupportedNote {
-                note: "scroll speed duration".to_owned(),
-            }
-        );
+        let sus = write(&chart).expect("unsupported speed is omitted");
+        assert_eq!(sus, "#REQUEST \"ticks_per_beat 384\"\n#00002: 4\n");
     }
 
     #[test]

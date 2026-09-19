@@ -1,5 +1,7 @@
 //! Shared chart domain model.
 
+use std::fmt::Display;
+
 mod chart;
 mod error;
 mod note;
@@ -16,3 +18,8 @@ pub use note::{
 pub use position::Position;
 pub use timeline::MeasureTimeline;
 pub use timing::{ScrollScope, ScrollSpeedChange, TempoChange};
+
+/// Reports information omitted because a target format cannot represent it.
+pub fn report_loss(format: &str, detail: impl Display) {
+    println!("{format}: unsupported notation was omitted; information was lost: {detail}");
+}
