@@ -21,6 +21,10 @@ pub enum SusError {
     MissingStart { line: usize, channel: char },
     #[error("channel `{channel}` has no end point")]
     MissingEnd { channel: char },
+    #[error("cannot represent `{note}` in the supported SUS output")]
+    UnsupportedNote { note: String },
+    #[error("position cannot be represented at the SUS resolution")]
+    UnrepresentablePosition,
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +36,194 @@ struct PendingSlide {
 /// Parses a SUS document into the shared chart model.
 pub fn parse(source: &str) -> Result<Chart, SusError> {
     Parser::new().parse(source)
+}
+
+/// Writes the basic central-lane chart model as a SUS document.
+pub fn write(chart: &Chart) -> Result<String, SusError> {
+    let mut records = Vec::new();
+    let mut bpm_definitions = Vec::new();
+    for (index, tempo) in chart.tempo_changes().iter().enumerate() {
+        let (measure, tick) = output_position(tempo.position())?;
+        let id = format!("{:02}", index + 1);
+        bpm_definitions.push(format!("#BPM{id}: {}\n", tempo.bpm()));
+        records.push(Record {
+            measure,
+            tick,
+            key: "08".to_owned(),
+            token: id,
+        });
+    }
+
+    for (index, note) in chart.notes().iter().enumerate() {
+        let channel = channel(index)?;
+        match note.kind() {
+            NoteKind::Tap(kind) => {
+                let (measure, tick) = output_position(note.position())?;
+                let lane = central_lane(note.lane(), "tap")?;
+                let token = match kind {
+                    TapKind::Tap => '1',
+                    TapKind::XTap => '2',
+                    TapKind::Flick => '3',
+                };
+                records.push(Record {
+                    measure,
+                    tick,
+                    key: format!("1{}", base36_digit(lane)),
+                    token: format!("{token}{}", base36_digit(lane_width(note.lane())?)),
+                });
+            }
+            NoteKind::Hold { end } => {
+                let (lane, width) = central_lane_parts(note.lane(), "hold")?;
+                add_hold_records(&mut records, note.position(), *end, lane, width, channel)?;
+            }
+            NoteKind::Slide { points } => {
+                add_slide_records(&mut records, points, channel)?;
+            }
+            NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. } => {
+                return Err(SusError::UnsupportedNote {
+                    note: "air".to_owned(),
+                });
+            }
+        }
+    }
+
+    records.sort_by_key(|record| (record.measure, record.tick, record.key.clone()));
+    let mut output = String::from("#REQUEST \"ticks_per_beat 384\"\n#00002: 4\n");
+    for definition in bpm_definitions {
+        output.push_str(&definition);
+    }
+    for record in records {
+        output.push_str(&format_record(&record)?);
+    }
+    Ok(output)
+}
+
+struct Record {
+    measure: u32,
+    tick: u64,
+    key: String,
+    token: String,
+}
+
+fn add_hold_records(
+    records: &mut Vec<Record>,
+    start: Position,
+    end: Position,
+    lane: u8,
+    width: u8,
+    channel: char,
+) -> Result<(), SusError> {
+    let (start_measure, start_tick) = output_position(start)?;
+    let (end_measure, end_tick) = output_position(end)?;
+    records.push(Record {
+        measure: start_measure,
+        tick: start_tick,
+        key: format!("3{}{channel}", base36_digit(lane)),
+        token: format!("1{}", base36_digit(width)),
+    });
+    records.push(Record {
+        measure: end_measure,
+        tick: end_tick,
+        key: format!("3{lane}{channel}"),
+        token: format!("2{width}"),
+    });
+    Ok(())
+}
+
+fn add_slide_records(
+    records: &mut Vec<Record>,
+    points: &[SlidePoint],
+    channel: char,
+) -> Result<(), SusError> {
+    for (index, point) in points.iter().enumerate() {
+        let lane = central_lane(point.lane(), "slide")?;
+        let (measure, tick) = output_position(point.position())?;
+        let kind = if index == 0 {
+            '1'
+        } else if index + 1 == points.len() {
+            '2'
+        } else {
+            '3'
+        };
+        records.push(Record {
+            measure,
+            tick,
+            key: format!("3{}{channel}", base36_digit(lane)),
+            token: format!("{kind}{}", base36_digit(lane_width(point.lane())?)),
+        });
+    }
+    Ok(())
+}
+
+fn format_record(record: &Record) -> Result<String, SusError> {
+    let padding = usize::try_from(record.tick).map_err(|_| SusError::UnrepresentablePosition)?;
+    let trailing = 384usize
+        .checked_sub(padding + 1)
+        .ok_or(SusError::UnrepresentablePosition)?;
+    Ok(format!(
+        "#{:03}{}: {}{}{}\n",
+        record.measure,
+        record.key,
+        "00".repeat(padding),
+        record.token,
+        "00".repeat(trailing),
+    ))
+}
+
+fn output_position(position: Position) -> Result<(u32, u64), SusError> {
+    let absolute_ticks = u128::from(position.numerator()) * 96;
+    let denominator = u128::from(position.denominator());
+    if absolute_ticks % denominator != 0 {
+        return Err(SusError::UnrepresentablePosition);
+    }
+    let absolute_ticks = absolute_ticks / denominator;
+    let measure = absolute_ticks / 384;
+    let tick = absolute_ticks % 384;
+    Ok((
+        u32::try_from(measure).map_err(|_| SusError::UnrepresentablePosition)?,
+        u64::try_from(tick).map_err(|_| SusError::UnrepresentablePosition)?,
+    ))
+}
+
+fn channel(index: usize) -> Result<char, SusError> {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    DIGITS
+        .get(index)
+        .copied()
+        .map(char::from)
+        .ok_or(SusError::UnrepresentablePosition)
+}
+
+fn central_lane(lane: Lane, note: &str) -> Result<u8, SusError> {
+    match lane {
+        Lane::Slider { start, .. } => Ok(start),
+        Lane::Side(_) => Err(SusError::UnsupportedNote {
+            note: note.to_owned(),
+        }),
+    }
+}
+
+fn central_lane_parts(lane: Lane, note: &str) -> Result<(u8, u8), SusError> {
+    match lane {
+        Lane::Slider { start, width } => Ok((start, width)),
+        Lane::Side(_) => Err(SusError::UnsupportedNote {
+            note: note.to_owned(),
+        }),
+    }
+}
+
+fn lane_width(lane: Lane) -> Result<u8, SusError> {
+    match lane {
+        Lane::Slider { width, .. } => Ok(width),
+        Lane::Side(_) => Err(SusError::UnsupportedNote {
+            note: "side lane".to_owned(),
+        }),
+    }
+}
+
+fn base36_digit(value: u8) -> char {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    char::from(DIGITS[usize::from(value)])
 }
 
 struct Parser {
@@ -160,6 +352,9 @@ impl Parser {
                 });
             }
             let key = std::str::from_utf8(token).unwrap();
+            if key == "00" {
+                continue;
+            }
             let bpm = *self
                 .bpm_definitions
                 .get(key)
@@ -400,16 +595,20 @@ fn side_button(lane: u8) -> Option<SideButton> {
 fn parse_position(value: &str) -> Result<Position, ()> {
     let (integer, fraction) = value.split_once('.').unwrap_or((value, ""));
     let integer = integer.parse::<u64>().map_err(|_| ())?;
-    let fraction_value = fraction.parse::<u64>().map_err(|_| ())?;
+    let fraction_value = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u64>().map_err(|_| ())?
+    };
     let denominator = 10u64.checked_pow(fraction.len() as u32).ok_or(())?;
     Position::new(integer * denominator + fraction_value, denominator).map_err(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
-    use chart::{Lane, NoteKind, Position, SideButton, TapKind};
+    use chart::{Chart, Lane, Note, NoteKind, Position, SideButton, TapKind, TempoChange};
 
-    use super::parse;
+    use super::{parse, write};
 
     #[test]
     fn parses_short_notes_and_variable_measure_lengths() {
@@ -460,5 +659,26 @@ mod tests {
     fn rejects_speed_commands_until_the_model_can_represent_them() {
         let error = parse("#HISPEED 00").expect_err("unsupported speed state");
         assert!(matches!(error, super::SusError::UnsupportedCommand { .. }));
+    }
+
+    #[test]
+    fn writes_basic_notes_and_timing() {
+        let position = Position::new(1, 1).unwrap();
+        let mut chart = Chart::new();
+        chart.add_tempo_change(TempoChange::new(position, 120.0).unwrap());
+        chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(10, 6).unwrap(),
+                NoteKind::Tap(TapKind::XTap),
+            )
+            .unwrap(),
+        );
+
+        let sus = write(&chart).expect("valid output");
+        assert!(sus.contains("#BPM01: 120"));
+        assert!(sus.contains("#00008:"));
+        assert!(sus.contains("#0001a:"));
+        assert_eq!(parse(&sus).unwrap().notes(), chart.notes());
     }
 }
