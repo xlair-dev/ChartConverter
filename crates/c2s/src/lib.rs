@@ -132,6 +132,9 @@ fn write_note(
             "HLD\t{measure}\t{tick}\t{lane}\t{width}\t{}",
             duration_ticks(note.position(), *end)?
         ),
+        NoteKind::ExHold { .. } | NoteKind::ExSlide { .. } => {
+            return Err(unsupported("ExLong is not supported yet"));
+        }
         NoteKind::Slide { points } => write_slide(points)?,
         NoteKind::Air { properties, parent } => format!(
             "{}\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}",
@@ -271,10 +274,12 @@ fn duration_ticks(start: Position, end: Position) -> Result<u64, C2sError> {
 
 fn note_duration_ticks(note: &Note) -> Result<u64, C2sError> {
     match note.kind() {
-        NoteKind::Hold { end } | NoteKind::AirHold { end, .. } => {
+        NoteKind::Hold { end } | NoteKind::ExHold { end, .. } | NoteKind::AirHold { end, .. } => {
             duration_ticks(note.position(), *end)
         }
-        NoteKind::Slide { points } | NoteKind::AirSlide { points, .. } => {
+        NoteKind::Slide { points }
+        | NoteKind::ExSlide { points, .. }
+        | NoteKind::AirSlide { points, .. } => {
             let end = points.last().ok_or(C2sError::UnrepresentablePosition)?;
             duration_ticks(note.position(), end.position())
         }

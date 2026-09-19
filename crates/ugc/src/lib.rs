@@ -211,6 +211,11 @@ fn write_non_air_note(note: &Note, prefix: &str, lane: u8, width: u8) -> Result<
             }
             text
         }
+        NoteKind::ExHold { .. } | NoteKind::ExSlide { .. } => {
+            return Err(UgcError::UnsupportedNote {
+                note: "ExLong".to_owned(),
+            });
+        }
         NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. } => {
             unreachable!("AIR notes are written by write_air_note")
         }

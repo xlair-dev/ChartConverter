@@ -54,8 +54,12 @@ fn chart_height(chart: &Chart) -> f64 {
 
 fn note_end_position(note: &Note) -> f64 {
     match note.kind() {
-        NoteKind::Hold { end } | NoteKind::AirHold { end, .. } => position_value(*end),
-        NoteKind::Slide { points } | NoteKind::AirSlide { points, .. } => points
+        NoteKind::Hold { end } | NoteKind::ExHold { end, .. } | NoteKind::AirHold { end, .. } => {
+            position_value(*end)
+        }
+        NoteKind::Slide { points }
+        | NoteKind::ExSlide { points, .. }
+        | NoteKind::AirSlide { points, .. } => points
             .last()
             .map(|point| position_value(point.position()))
             .unwrap_or_else(|| position_value(note.position())),
@@ -94,8 +98,12 @@ fn render_note(svg: &mut String, note: &Note) {
         }
         NoteKind::ExTap { .. } => circle(svg, "extap", note.lane(), start_y, 8.0),
         NoteKind::Mine => circle(svg, "mine", note.lane(), start_y, 7.0),
-        NoteKind::Hold { end } => line(svg, "hold", note.lane(), start_y, y_position(*end)),
-        NoteKind::Slide { points } => polyline(svg, "slide", points),
+        NoteKind::Hold { end } | NoteKind::ExHold { end, .. } => {
+            line(svg, "hold", note.lane(), start_y, y_position(*end))
+        }
+        NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => {
+            polyline(svg, "slide", points)
+        }
         NoteKind::Air { .. } => circle(svg, "air", note.lane(), start_y, 5.0),
         NoteKind::AirHold { end, .. } => {
             line(svg, "air-hold", note.lane(), start_y, y_position(*end))

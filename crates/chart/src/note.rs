@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::{AirColor, AirProperties, Lane, Note, NoteKind, SideButton, SlidePoint, TapKind};
-    use crate::{NoteId, Position};
+    use crate::{ExDirection, NoteId, Position};
 
     #[test]
     fn rejects_a_hold_that_does_not_advance_in_time() {
@@ -103,6 +103,29 @@ mod tests {
             AirProperties::new(super::AirDirection::Up)
                 .with_height(f64::NAN)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn accepts_ex_long_notes_and_preserves_their_direction() {
+        let start = Position::new(0, 1).expect("valid position");
+        let end = Position::new(1, 1).expect("valid position");
+        let note = Note::new(
+            start,
+            Lane::slider(0, 4).expect("valid lane"),
+            NoteKind::ExHold {
+                end,
+                direction: ExDirection::Left,
+            },
+        )
+        .expect("valid Ex Hold");
+
+        assert_eq!(
+            note.kind(),
+            &NoteKind::ExHold {
+                end,
+                direction: ExDirection::Left,
+            }
         );
     }
 }
@@ -251,8 +274,16 @@ pub enum NoteKind {
     Hold {
         end: Position,
     },
+    ExHold {
+        end: Position,
+        direction: ExDirection,
+    },
     Slide {
         points: Vec<SlidePoint>,
+    },
+    ExSlide {
+        points: Vec<SlidePoint>,
+        direction: ExDirection,
     },
     Air {
         properties: AirProperties,
@@ -281,10 +312,12 @@ pub struct Note {
 impl Note {
     pub fn new(position: Position, lane: Lane, kind: NoteKind) -> Result<Self, ChartError> {
         match &kind {
-            NoteKind::Hold { end } if *end <= position => {
+            NoteKind::Hold { end } | NoteKind::ExHold { end, .. } if *end <= position => {
                 return Err(ChartError::InvalidHoldEnd);
             }
-            NoteKind::Slide { points } | NoteKind::AirSlide { points, .. } => {
+            NoteKind::Slide { points }
+            | NoteKind::ExSlide { points, .. }
+            | NoteKind::AirSlide { points, .. } => {
                 validate_slide(position, lane, points)?;
             }
             NoteKind::AirHold { end, .. } if *end <= position => {
@@ -314,8 +347,9 @@ impl Note {
 
     /// Appends a point to a slide while preserving its temporal invariants.
     pub fn append_slide_point(&mut self, point: SlidePoint) -> Result<(), ChartError> {
-        let NoteKind::Slide { points } = &mut self.kind else {
-            return Err(ChartError::InvalidSlidePointCount);
+        let points = match &mut self.kind {
+            NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => points,
+            _ => return Err(ChartError::InvalidSlidePointCount),
         };
         if points
             .last()
