@@ -1,8 +1,8 @@
 //! Parser for the timing and basic-note subset of the UGC chart format.
 
 use chart::{
-    Chart, ChartError, Lane, MeasureTimeline, Note, NoteKind, Position, SlidePoint, TapKind,
-    TempoChange,
+    Chart, ChartError, Lane, MeasureTimeline, Note, NoteKind, Position, ScrollScope,
+    ScrollSpeedChange, SlidePoint, TapKind, TempoChange,
 };
 use thiserror::Error;
 
@@ -179,6 +179,7 @@ struct Parser {
     timeline: MeasureTimeline,
     chart: Chart,
     in_header: bool,
+    current_speed_group: Option<u32>,
 }
 
 impl Parser {
@@ -188,6 +189,7 @@ impl Parser {
             timeline: MeasureTimeline::new(Position::new(4, 1).unwrap()),
             chart: Chart::new(),
             in_header: true,
+            current_speed_group: None,
         }
     }
 
@@ -219,7 +221,13 @@ impl Parser {
             }
             let (consumed, note) = self.parse_note(line_number, line, &lines[index + 1..])?;
             if let Some(note) = note {
-                self.chart.add_note(note);
+                let note_id = self.chart.add_note(note);
+                self.chart
+                    .set_note_speed_group(note_id, self.current_speed_group)
+                    .map_err(|source| UgcError::Chart {
+                        line: line_number,
+                        source,
+                    })?;
             }
             index += consumed + 1;
         }
@@ -241,25 +249,65 @@ impl Parser {
             }
             "@BEAT" => self.parse_beat(line, value)?,
             "@BPM" => self.parse_bpm(line, value)?,
-            "@TIL" | "@SPDMOD" | "@MAINTIL" | "@USETIL" => {
-                return Err(UgcError::UnsupportedRecord {
-                    line,
-                    record: tag.to_owned(),
-                });
+            "@TIL" => self.parse_group_speed(line, value)?,
+            "@SPDMOD" => self.parse_global_speed(line, value)?,
+            "@MAINTIL" => {
+                if value != "0" {
+                    return Err(UgcError::UnsupportedRecord {
+                        line,
+                        record: tag.to_owned(),
+                    });
+                }
             }
+            "@USETIL" => self.parse_speed_group(line, value)?,
             _ => {}
         }
         Ok(())
     }
 
     fn parse_directive(&mut self, line: usize, text: &str) -> Result<(), UgcError> {
-        let (tag, _) = split_directive(text)?;
-        if tag == "@TIL" || tag == "@SPDMOD" || tag == "@USETIL" {
-            return Err(UgcError::UnsupportedRecord {
-                line,
-                record: tag.to_owned(),
-            });
+        let (tag, value) = split_directive(text)?;
+        match tag {
+            "@TIL" => self.parse_group_speed(line, value)?,
+            "@SPDMOD" => self.parse_global_speed(line, value)?,
+            "@USETIL" => self.parse_speed_group(line, value)?,
+            _ => {}
         }
+        Ok(())
+    }
+
+    fn parse_group_speed(&mut self, line: usize, value: &str) -> Result<(), UgcError> {
+        let fields: Vec<_> = value.split_whitespace().collect();
+        if fields.len() != 3 {
+            return Err(UgcError::MalformedRecord { line });
+        }
+        let group = parse_u32(line, fields[0])?;
+        let (measure, tick) = parse_measure_tick(line, fields[1])?;
+        let speed = parse_speed(line, fields[2])?;
+        let position = self.position(line, measure, tick)?;
+        let change = ScrollSpeedChange::with_scope(position, speed, ScrollScope::Group(group))
+            .map_err(|source| UgcError::Chart { line, source })?;
+        self.chart.add_scroll_speed_change(change);
+        Ok(())
+    }
+
+    fn parse_global_speed(&mut self, line: usize, value: &str) -> Result<(), UgcError> {
+        let fields: Vec<_> = value.split_whitespace().collect();
+        if fields.len() != 2 {
+            return Err(UgcError::MalformedRecord { line });
+        }
+        let (measure, tick) = parse_measure_tick(line, fields[0])?;
+        let speed = parse_speed(line, fields[1])?;
+        let position = self.position(line, measure, tick)?;
+        let change = ScrollSpeedChange::new(position, speed)
+            .map_err(|source| UgcError::Chart { line, source })?;
+        self.chart.add_scroll_speed_change(change);
+        Ok(())
+    }
+
+    fn parse_speed_group(&mut self, line: usize, value: &str) -> Result<(), UgcError> {
+        let group = parse_u32(line, value)?;
+        self.current_speed_group = (group != 0).then_some(group);
         Ok(())
     }
 
@@ -490,6 +538,13 @@ fn parse_u64(line: usize, value: &str) -> Result<u64, UgcError> {
     })
 }
 
+fn parse_speed(line: usize, value: &str) -> Result<f64, UgcError> {
+    value.parse().map_err(|_| UgcError::InvalidValue {
+        line,
+        value: value.to_owned(),
+    })
+}
+
 fn parse_u32(line: usize, value: &str) -> Result<u32, UgcError> {
     parse_u64(line, value)?
         .try_into()
@@ -526,11 +581,24 @@ mod tests {
             parse(air),
             Err(super::UgcError::UnsupportedRecord { .. })
         ));
-        let speed = "@TIL\t0\t0'0\t1.0\n@ENDHEAD\n";
+        let speed = "@MAINTIL\t1\n@ENDHEAD\n";
         assert!(matches!(
             parse(speed),
             Err(super::UgcError::UnsupportedRecord { .. })
         ));
+    }
+
+    #[test]
+    fn applies_ugc_speed_groups_to_following_notes() {
+        let source =
+            "@TICKS\t480\n@BEAT\t0\t4\t4\n@TIL\t2\t0'0\t1.5\n@ENDHEAD\n@USETIL\t2\n#0'0:t04\n";
+        let chart = parse(source).expect("valid speed group");
+
+        assert_eq!(chart.scroll_speed_changes().len(), 1);
+        assert_eq!(
+            chart.note_speed_group(chart::NoteId::new(0)).unwrap(),
+            Some(2)
+        );
     }
 
     #[test]

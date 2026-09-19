@@ -1,7 +1,32 @@
 use crate::{
+    error::ChartError,
     note::Note,
     timing::{ScrollSpeedChange, TempoChange},
 };
+
+#[cfg(test)]
+mod tests {
+    use super::Chart;
+    use crate::{Lane, Note, NoteKind, Position, TapKind};
+
+    #[test]
+    fn assigns_speed_groups_to_note_ids() {
+        let mut chart = Chart::new();
+        let note_id = chart.add_note(
+            Note::new(
+                Position::new(0, 1).unwrap(),
+                Lane::slider(0, 1).unwrap(),
+                NoteKind::Tap(TapKind::Tap),
+            )
+            .unwrap(),
+        );
+
+        chart
+            .set_note_speed_group(note_id, Some(2))
+            .expect("valid note id");
+        assert_eq!(chart.note_speed_group(note_id).unwrap(), Some(2));
+    }
+}
 
 /// Identifies a note by its insertion index in a chart.
 ///
@@ -22,6 +47,7 @@ impl NoteId {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Chart {
     notes: Vec<Note>,
+    note_speed_groups: Vec<Option<u32>>,
     tempo_changes: Vec<TempoChange>,
     scroll_speed_changes: Vec<ScrollSpeedChange>,
 }
@@ -34,6 +60,7 @@ impl Chart {
     pub fn add_note(&mut self, note: Note) -> NoteId {
         let id = NoteId::new(self.notes.len() as u32);
         self.notes.push(note);
+        self.note_speed_groups.push(None);
         id
     }
 
@@ -47,6 +74,26 @@ impl Chart {
 
     pub fn notes(&self) -> &[Note] {
         &self.notes
+    }
+
+    pub fn set_note_speed_group(
+        &mut self,
+        note_id: NoteId,
+        group: Option<u32>,
+    ) -> Result<(), ChartError> {
+        let speed_group = self
+            .note_speed_groups
+            .get_mut(note_id.value() as usize)
+            .ok_or(ChartError::InvalidNoteId)?;
+        *speed_group = group;
+        Ok(())
+    }
+
+    pub fn note_speed_group(&self, note_id: NoteId) -> Result<Option<u32>, ChartError> {
+        self.note_speed_groups
+            .get(note_id.value() as usize)
+            .copied()
+            .ok_or(ChartError::InvalidNoteId)
     }
 
     pub fn tempo_changes(&self) -> &[TempoChange] {
