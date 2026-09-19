@@ -181,21 +181,7 @@ fn write_note(
             points,
             color,
             parent,
-        } => {
-            if points.len() != 2 {
-                return Err(unsupported("multi-segment AIR Slide"));
-            }
-            let end = &points[1];
-            let (end_lane, end_width) = c2s_lane(end.lane())?;
-            format!(
-                "ASD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{:.6}\t{}\t{end_lane}\t{end_width}\t{:.6}\t{}",
-                parent_type(chart, *parent)?,
-                points[0].height(),
-                duration_ticks(note.position(), end.position())?,
-                end.height(),
-                encode_air_color(*color)
-            )
-        }
+        } => write_air_slide(points, *color, *parent, chart)?,
     };
     records.push(Record::new(measure, tick, index, text));
     if let Some(group) = chart
@@ -240,6 +226,42 @@ fn write_slide(points: &[SlidePoint], direction: Option<ExDirection>) -> Result<
                 record.push_str(encode_ex_direction(direction));
             }
             Ok(record)
+        })
+        .collect::<Result<Vec<_>, C2sError>>()
+        .map(|records| records.join("\n"))
+}
+
+fn write_air_slide(
+    points: &[chart::AirPoint],
+    color: AirColor,
+    parent: NoteId,
+    chart: &Chart,
+) -> Result<String, C2sError> {
+    if points.len() < 2 {
+        return Err(unsupported("AIR Slide without an end point"));
+    }
+    points
+        .windows(2)
+        .enumerate()
+        .map(|(index, segment)| {
+            let start = &segment[0];
+            let end = &segment[1];
+            let (measure, tick) = output_position(start.position())?;
+            let (start_lane, start_width) = c2s_lane(start.lane())?;
+            let (end_lane, end_width) = c2s_lane(end.lane())?;
+            let kind = "ASD";
+            let target = if index == 0 {
+                parent_type(chart, parent)?
+            } else {
+                "ASC"
+            };
+            Ok(format!(
+                "{kind}\t{measure}\t{tick}\t{start_lane}\t{start_width}\t{target}\t{:.6}\t{}\t{end_lane}\t{end_width}\t{:.6}\t{}",
+                start.height(),
+                duration_ticks(start.position(), end.position())?,
+                end.height(),
+                encode_air_color(color)
+            ))
         })
         .collect::<Result<Vec<_>, C2sError>>()
         .map(|records| records.join("\n"))
@@ -837,7 +859,10 @@ impl Parser {
             fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
             fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
         )?;
-        let parent = self.air_parent(line, fields.get(5))?;
+        let is_continuation = fields.get(5).is_some_and(|value| *value == "ASC");
+        let parent = (!is_continuation)
+            .then(|| self.air_parent(line, fields.get(5)))
+            .transpose()?;
         let height = fields
             .get(6)
             .ok_or(C2sError::MalformedRecord { line })?
@@ -888,6 +913,37 @@ impl Parser {
             chart::AirPoint::new(end, end_lane, end_height)
                 .map_err(|source| C2sError::Chart { line, source })?,
         ];
+        if is_continuation {
+            let note_id = self
+                .chart
+                .notes()
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, note)| {
+                    let NoteKind::AirSlide {
+                        points,
+                        color: existing_color,
+                        ..
+                    } = note.kind()
+                    else {
+                        return false;
+                    };
+                    existing_color == &color
+                        && points.last().is_some_and(|point| {
+                            point.position() == start && point.lane() == start_lane
+                        })
+                })
+                .map(|(index, _)| NoteId::new(index as u32))
+                .ok_or(C2sError::InvalidValue {
+                    line,
+                    value: "AIR Slide continuation without a parent".to_owned(),
+                })?;
+            self.chart
+                .append_air_slide_point(note_id, points[1].clone())
+                .map_err(|source| C2sError::Chart { line, source })?;
+            return Ok(());
+        }
         self.add_note(
             line,
             Note::new(
@@ -896,7 +952,7 @@ impl Parser {
                 NoteKind::AirSlide {
                     points,
                     color,
-                    parent,
+                    parent: parent.ok_or(C2sError::MalformedRecord { line })?,
                 },
             ),
         )?;
@@ -1364,6 +1420,39 @@ mod tests {
         let c2s = write(&chart).expect("valid C2S output");
         assert!(c2s.contains("SLC\t0\t0\t0\t4\t96\t4\t4"));
         assert!(c2s.contains("SLD\t0\t96\t4\t4\t96\t8\t4"));
+        let parsed = parse(&c2s).expect("round-tripped C2S output");
+        assert_eq!(parsed.notes(), chart.notes());
+    }
+
+    #[test]
+    fn writes_and_parses_multi_segment_air_slides() {
+        let mut chart = Chart::new();
+        let start = Position::new(0, 1).unwrap();
+        let middle = Position::new(1, 2).unwrap();
+        let end = Position::new(1, 1).unwrap();
+        let start_lane = Lane::slider(0, 4).unwrap();
+        let parent =
+            chart.add_note(Note::new(start, start_lane, NoteKind::Tap(TapKind::Tap)).unwrap());
+        chart.add_note(
+            Note::new(
+                start,
+                start_lane,
+                NoteKind::AirSlide {
+                    points: vec![
+                        chart::AirPoint::new(start, start_lane, 2.0).unwrap(),
+                        chart::AirPoint::new(middle, Lane::slider(4, 4).unwrap(), 2.5).unwrap(),
+                        chart::AirPoint::new(end, Lane::slider(8, 4).unwrap(), 3.0).unwrap(),
+                    ],
+                    color: chart::AirColor::Normal,
+                    parent,
+                },
+            )
+            .unwrap(),
+        );
+
+        let c2s = write(&chart).expect("valid C2S output");
+        assert!(c2s.contains("ASD\t0\t0\t0\t4\tTAP\t2.000000\t48\t4\t4\t2.500000\tDEF"));
+        assert!(c2s.contains("ASD\t0\t48\t4\t4\tASC\t2.500000\t48\t8\t4\t3.000000\tDEF"));
         let parsed = parse(&c2s).expect("round-tripped C2S output");
         assert_eq!(parsed.notes(), chart.notes());
     }
