@@ -113,9 +113,12 @@ fn write_note(note: &Note) -> Result<OutputRecord, UgcError> {
             }
             text
         }
-        NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. } => {
+        NoteKind::Mine
+        | NoteKind::Air { .. }
+        | NoteKind::AirHold { .. }
+        | NoteKind::AirSlide { .. } => {
             return Err(UgcError::UnsupportedNote {
-                note: "air".to_owned(),
+                note: "unsupported note kind".to_owned(),
             });
         }
     };
