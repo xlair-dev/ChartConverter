@@ -1,8 +1,8 @@
-//! Parser for the note and timing subset of the C2S chart format.
+//! Parser and writer for the shared note and timing subset of the C2S format.
 
 use chart::{
-    AirDirection, AirProperties, Chart, ChartError, ExDirection, Lane, Note, NoteId, NoteKind,
-    Position, ScrollScope, ScrollSpeedChange, SlidePoint, TapKind, TempoChange,
+    AirColor, AirDirection, AirProperties, Chart, ChartError, ExDirection, Lane, Note, NoteId,
+    NoteKind, Position, ScrollScope, ScrollSpeedChange, SlidePoint, TapKind, TempoChange,
 };
 use thiserror::Error;
 
@@ -18,6 +18,8 @@ pub enum C2sError {
     Chart { line: usize, source: ChartError },
     #[error("the RESOLUTION header is missing")]
     MissingResolution,
+    #[error("position cannot be represented at the C2S resolution")]
+    UnrepresentablePosition,
 }
 
 /// Parses a C2S document into the shared chart model.
@@ -25,12 +27,293 @@ pub fn parse(source: &str) -> Result<Chart, C2sError> {
     Parser::new().parse(source)
 }
 
+/// Writes the representable shared chart model as a C2S document.
+pub fn write(chart: &Chart) -> Result<String, C2sError> {
+    let mut records = Vec::new();
+    for (index, tempo) in chart.tempo_changes().iter().enumerate() {
+        let (measure, tick) = output_position(tempo.position())?;
+        records.push(Record::new(
+            measure,
+            tick,
+            index,
+            format!("BPM\t{measure}\t{tick}\t{:.6}", tempo.bpm()),
+        ));
+    }
+    for (index, change) in chart.scroll_speed_changes().iter().enumerate() {
+        let (measure, tick) = output_position(change.position())?;
+        let duration = change.duration().ok_or(C2sError::UnsupportedRecord {
+            line: 0,
+            record: "scroll speed without duration".to_owned(),
+        })?;
+        let duration = output_ticks(duration)?;
+        let (kind, group) = match change.scope() {
+            ScrollScope::Global => ("SFL", None),
+            ScrollScope::Group(group) => ("SLP", Some(group.to_string())),
+            _ => {
+                return Err(C2sError::UnsupportedRecord {
+                    line: 0,
+                    record: "unsupported scroll speed scope".to_owned(),
+                });
+            }
+        };
+        let suffix = group.map_or_else(String::new, |group| format!("\t{group}"));
+        records.push(Record::new(
+            measure,
+            tick,
+            index,
+            format!(
+                "{kind}\t{measure}\t{tick}\t{duration}\t{:.6}{suffix}",
+                change.speed()
+            ),
+        ));
+    }
+    for (index, note) in chart.notes().iter().enumerate() {
+        write_note(chart, index, note, &mut records)?;
+    }
+    records.sort_by_key(|record| (record.measure, record.tick, record.order));
+
+    let mut output = String::from("RESOLUTION\t384\n");
+    for record in records {
+        output.push_str(&record.text);
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+struct Record {
+    measure: u32,
+    tick: u64,
+    order: usize,
+    text: String,
+}
+
+impl Record {
+    fn new(measure: u32, tick: u64, order: usize, text: String) -> Self {
+        Self {
+            measure,
+            tick,
+            order,
+            text,
+        }
+    }
+}
+
+fn write_note(
+    chart: &Chart,
+    index: usize,
+    note: &Note,
+    records: &mut Vec<Record>,
+) -> Result<(), C2sError> {
+    let (measure, tick) = output_position(note.position())?;
+    let (lane, width) = c2s_lane(note.lane())?;
+    let id = NoteId::new(index as u32);
+    let text = match note.kind() {
+        NoteKind::Tap(kind) => {
+            let tag = match kind {
+                TapKind::Tap => "TAP",
+                TapKind::XTap => {
+                    return Err(unsupported("XTap cannot be represented by C2S"));
+                }
+                TapKind::Flick { direction: None } => "FLK",
+                TapKind::Flick { direction: Some(_) } => {
+                    return Err(unsupported(
+                        "directional Flick cannot be represented by C2S",
+                    ));
+                }
+            };
+            format!("{tag}\t{measure}\t{tick}\t{lane}\t{width}")
+        }
+        NoteKind::ExTap { direction } => format!(
+            "CHR\t{measure}\t{tick}\t{lane}\t{width}\t{}",
+            encode_ex_direction(*direction)
+        ),
+        NoteKind::Mine => format!("MNE\t{measure}\t{tick}\t{lane}\t{width}"),
+        NoteKind::Hold { end } => format!(
+            "HLD\t{measure}\t{tick}\t{lane}\t{width}\t{}",
+            duration_ticks(note.position(), *end)?
+        ),
+        NoteKind::Slide { points } => write_slide(measure, tick, points)?,
+        NoteKind::Air { properties, parent } => format!(
+            "{}\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}",
+            encode_air_direction(
+                properties
+                    .direction()
+                    .ok_or_else(|| { unsupported("AIR direction is missing") })?
+            ),
+            parent_type(chart, *parent)?,
+            encode_air_color(properties.color())
+        ),
+        NoteKind::AirHold {
+            end,
+            properties,
+            parent,
+        } => format!(
+            "AHD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}\t{}",
+            parent_type(chart, *parent)?,
+            duration_ticks(note.position(), *end)?,
+            encode_air_color(properties.color())
+        ),
+        NoteKind::AirSlide {
+            points,
+            properties,
+            end_height: Some(end_height),
+            parent,
+        } => {
+            if points.len() != 2 {
+                return Err(unsupported("multi-segment AIR Slide"));
+            }
+            let end = &points[1];
+            let (end_lane, end_width) = c2s_lane(end.lane())?;
+            format!(
+                "ASD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}\t{}\t{end_lane}\t{end_width}\t{end_height:.6}\t{}",
+                parent_type(chart, *parent)?,
+                properties
+                    .height()
+                    .ok_or_else(|| unsupported("AIR Slide height is missing"))?,
+                duration_ticks(note.position(), end.position())?,
+                encode_air_color(properties.color())
+            )
+        }
+        NoteKind::AirSlide { .. } => {
+            return Err(unsupported("AIR Slide end height is missing"));
+        }
+    };
+    records.push(Record::new(measure, tick, index, text));
+    if let Some(group) = chart
+        .note_speed_group(id)
+        .map_err(|_| C2sError::MalformedRecord { line: 0 })?
+    {
+        records.push(Record::new(
+            measure,
+            tick,
+            index,
+            format!(
+                "SLA\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{group}",
+                note_duration_ticks(note)?
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn write_slide(measure: u32, tick: u64, points: &[SlidePoint]) -> Result<String, C2sError> {
+    if points.len() != 2 {
+        return Err(unsupported("slide without an end point"));
+    }
+    let (start_lane, start_width) = c2s_lane(points[0].lane())?;
+    let (end_lane, end_width) = c2s_lane(points[1].lane())?;
+    Ok(format!(
+        "SLD\t{measure}\t{tick}\t{start_lane}\t{start_width}\t{}\t{end_lane}\t{end_width}",
+        duration_ticks(points[0].position(), points[1].position())?
+    ))
+}
+
+fn parent_type(chart: &Chart, parent: NoteId) -> Result<&'static str, C2sError> {
+    match chart
+        .note(parent)
+        .map_err(|_| C2sError::InvalidValue {
+            line: 0,
+            value: "invalid note parent".to_owned(),
+        })?
+        .kind()
+    {
+        NoteKind::Tap(TapKind::Tap) => Ok("TAP"),
+        NoteKind::Tap(TapKind::Flick { .. }) => Ok("FLK"),
+        NoteKind::ExTap { .. } => Ok("CHR"),
+        NoteKind::Hold { .. } => Ok("HLD"),
+        NoteKind::Slide { .. } => Ok("SLD"),
+        _ => Err(unsupported("unsupported AIR parent")),
+    }
+}
+
+fn c2s_lane(lane: Lane) -> Result<(u8, u8), C2sError> {
+    match lane {
+        Lane::Slider { start, width } => Ok((start, width)),
+        Lane::Side(_) => Err(unsupported("side lane cannot be represented by C2S")),
+    }
+}
+
+fn output_position(position: Position) -> Result<(u32, u64), C2sError> {
+    let ticks = output_ticks(position)?;
+    Ok((
+        u32::try_from(ticks / 384).map_err(|_| C2sError::UnrepresentablePosition)?,
+        ticks % 384,
+    ))
+}
+
+fn output_ticks(position: Position) -> Result<u64, C2sError> {
+    let ticks = u128::from(position.numerator()) * 96;
+    let denominator = u128::from(position.denominator());
+    if ticks % denominator != 0 {
+        return Err(C2sError::UnrepresentablePosition);
+    }
+    u64::try_from(ticks / denominator).map_err(|_| C2sError::UnrepresentablePosition)
+}
+
+fn duration_ticks(start: Position, end: Position) -> Result<u64, C2sError> {
+    output_ticks(end)?
+        .checked_sub(output_ticks(start)?)
+        .ok_or(C2sError::UnrepresentablePosition)
+}
+
+fn note_duration_ticks(note: &Note) -> Result<u64, C2sError> {
+    match note.kind() {
+        NoteKind::Hold { end } | NoteKind::AirHold { end, .. } => {
+            duration_ticks(note.position(), *end)
+        }
+        NoteKind::Slide { points } | NoteKind::AirSlide { points, .. } => {
+            let end = points.last().ok_or(C2sError::UnrepresentablePosition)?;
+            duration_ticks(note.position(), end.position())
+        }
+        _ => Ok(1),
+    }
+}
+
+fn encode_ex_direction(direction: ExDirection) -> &'static str {
+    match direction {
+        ExDirection::Up => "UP",
+        ExDirection::Down => "DW",
+        ExDirection::Center => "CE",
+        ExDirection::All => "ALL",
+        ExDirection::Wide => "VLT",
+        ExDirection::Left => "LS",
+        ExDirection::Right => "RS",
+        ExDirection::Inward => "IN",
+    }
+}
+
+fn encode_air_direction(direction: AirDirection) -> &'static str {
+    match direction {
+        AirDirection::Up => "AIR",
+        AirDirection::UpperRight => "AUR",
+        AirDirection::UpperLeft => "AUL",
+        AirDirection::Down => "ADW",
+        AirDirection::LowerRight => "ADR",
+        AirDirection::LowerLeft => "ADL",
+    }
+}
+
+fn encode_air_color(color: AirColor) -> &'static str {
+    match color {
+        AirColor::Normal => "DEF",
+        AirColor::Inverted => "PPL",
+    }
+}
+
+fn unsupported(record: &str) -> C2sError {
+    C2sError::UnsupportedRecord {
+        line: 0,
+        record: record.to_owned(),
+    }
+}
+
 struct Parser {
     resolution: Option<u64>,
     timeline: chart::MeasureTimeline,
     chart: Chart,
     last_ex_parent: Option<NoteId>,
-    last_air_direction: Option<AirDirection>,
+    last_tap_parent: Option<NoteId>,
+    last_flick_parent: Option<NoteId>,
     last_hold_parent: Option<NoteId>,
     last_slide_parent: Option<NoteId>,
 }
@@ -42,7 +325,8 @@ impl Parser {
             timeline: chart::MeasureTimeline::new(Position::new(4, 1).unwrap()),
             chart: Chart::new(),
             last_ex_parent: None,
-            last_air_direction: None,
+            last_tap_parent: None,
+            last_flick_parent: None,
             last_hold_parent: None,
             last_slide_parent: None,
         }
@@ -152,8 +436,13 @@ impl Parser {
             fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
         )?;
         let position = self.position(line, measure, tick)?;
-        self.add_note(line, Note::new(position, lane, NoteKind::Tap(kind)))
-            .map(|_| ())
+        let id = self.add_note(line, Note::new(position, lane, NoteKind::Tap(kind)))?;
+        match kind {
+            TapKind::Tap => self.last_tap_parent = Some(id),
+            TapKind::Flick { .. } => self.last_flick_parent = Some(id),
+            TapKind::XTap => {}
+        }
+        Ok(())
     }
 
     fn parse_mine(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
@@ -185,21 +474,22 @@ impl Parser {
             Note::new(position, lane, NoteKind::ExTap { direction }),
         )?;
         self.last_ex_parent = Some(id);
-        self.last_air_direction = Some(air_direction_from_ex(line, direction)?);
         Ok(())
     }
 
     fn parse_air(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
-        let parent_type = fields.get(5).ok_or(C2sError::MalformedRecord { line })?;
-        if *parent_type != "CHR" || fields.get(6) != Some(&"DEF") {
-            return Err(C2sError::InvalidValue {
-                line,
-                value: fields[5..].join(" "),
-            });
+        let parent_type = *fields.get(5).ok_or(C2sError::MalformedRecord { line })?;
+        let parent = match parent_type {
+            "CHR" => self.last_ex_parent,
+            "TAP" => self.last_tap_parent,
+            "FLK" => self.last_flick_parent,
+            "HLD" => self.last_hold_parent,
+            "SLD" => self.last_slide_parent,
+            _ => None,
         }
-        let parent = self.last_ex_parent.ok_or(C2sError::InvalidValue {
+        .ok_or(C2sError::InvalidValue {
             line,
-            value: "AIR without CHR parent".to_owned(),
+            value: format!("AIR without {parent_type} parent"),
         })?;
         let (measure, tick) = self.location(line, fields)?;
         let lane = self.lane(
@@ -208,11 +498,12 @@ impl Parser {
             fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
         )?;
         let position = self.position(line, measure, tick)?;
-        let direction = self.last_air_direction.ok_or(C2sError::InvalidValue {
+        let direction = parse_air_direction(line, fields[0])?;
+        let color = parse_air_color(
             line,
-            value: "CHR without an AIR direction".to_owned(),
-        })?;
-        let properties = AirProperties::new(direction);
+            fields.get(6).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let properties = AirProperties::new(direction).with_color(color);
         self.add_note(
             line,
             Note::new(position, lane, NoteKind::Air { properties, parent }),
@@ -534,15 +825,17 @@ fn parse_ex_direction(line: usize, value: &str) -> Result<ExDirection, C2sError>
     }
 }
 
-fn air_direction_from_ex(line: usize, direction: ExDirection) -> Result<AirDirection, C2sError> {
-    match direction {
-        ExDirection::Up => Ok(AirDirection::Up),
-        ExDirection::Down => Ok(AirDirection::Down),
-        ExDirection::Left => Ok(AirDirection::UpperLeft),
-        ExDirection::Right => Ok(AirDirection::UpperRight),
+fn parse_air_direction(line: usize, value: &str) -> Result<AirDirection, C2sError> {
+    match value {
+        "AIR" => Ok(AirDirection::Up),
+        "AUR" => Ok(AirDirection::UpperRight),
+        "AUL" => Ok(AirDirection::UpperLeft),
+        "ADW" => Ok(AirDirection::Down),
+        "ADR" => Ok(AirDirection::LowerRight),
+        "ADL" => Ok(AirDirection::LowerLeft),
         _ => Err(C2sError::InvalidValue {
             line,
-            value: "unsupported AIR direction".to_owned(),
+            value: value.to_owned(),
         }),
     }
 }
@@ -585,9 +878,9 @@ fn parse_u8(line: usize, value: &str) -> Result<u8, C2sError> {
 
 #[cfg(test)]
 mod tests {
-    use chart::{Lane, NoteKind, Position, TapKind};
+    use chart::{Chart, Lane, Note, NoteKind, Position, TapKind, TempoChange};
 
-    use super::parse;
+    use super::{parse, write};
 
     #[test]
     fn parses_timing_taps_holds_and_slides() {
@@ -645,5 +938,64 @@ mod tests {
     fn rejects_zero_resolution() {
         let error = parse("RESOLUTION\t0").expect_err("invalid resolution");
         assert!(matches!(error, super::C2sError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn writes_basic_and_extended_notes_and_round_trips_them() {
+        let mut chart = Chart::new();
+        chart.add_tempo_change(TempoChange::new(Position::new(0, 1).unwrap(), 120.0).unwrap());
+        let position = Position::new(1, 1).unwrap();
+        let end = Position::new(2, 1).unwrap();
+        chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::Tap(TapKind::Tap),
+            )
+            .unwrap(),
+        );
+        chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(2, 2).unwrap(),
+                NoteKind::Air {
+                    properties: chart::AirProperties::new(chart::AirDirection::Up),
+                    parent: chart::NoteId::new(0),
+                },
+            )
+            .unwrap(),
+        );
+        chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(4, 2).unwrap(),
+                NoteKind::Tap(TapKind::Flick { direction: None }),
+            )
+            .unwrap(),
+        );
+        chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(8, 2).unwrap(),
+                NoteKind::ExTap {
+                    direction: chart::ExDirection::Up,
+                },
+            )
+            .unwrap(),
+        );
+        chart.add_note(Note::new(position, Lane::slider(10, 2).unwrap(), NoteKind::Mine).unwrap());
+        chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(12, 2).unwrap(),
+                NoteKind::Hold { end },
+            )
+            .unwrap(),
+        );
+
+        let c2s = write(&chart).expect("valid C2S output");
+        let parsed = parse(&c2s).expect("round-tripped C2S output");
+        assert_eq!(parsed.notes(), chart.notes());
+        assert_eq!(parsed.tempo_changes(), chart.tempo_changes());
     }
 }
