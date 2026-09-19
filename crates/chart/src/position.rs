@@ -28,7 +28,8 @@ impl Position {
         self.denominator
     }
 
-    pub(crate) fn checked_add(self, other: Self) -> Result<Self, ChartError> {
+    /// Adds two absolute beat positions without losing rational precision.
+    pub fn checked_add(self, other: Self) -> Result<Self, ChartError> {
         let left = self
             .numerator
             .checked_mul(other.denominator)
