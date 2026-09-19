@@ -3,9 +3,9 @@
 use std::collections::BTreeSet;
 
 use chart::{
-    AirColor, AirCrushColor, AirCrushPoint, AirDirection, AirProperties, Chart, ChartError,
-    ExDirection, Lane, Note, NoteId, NoteKind, Position, ScrollScope, ScrollSpeedChange,
-    SlidePoint, SlidePointKind, TapKind, TempoChange, report_loss,
+    AirColor, AirCrushColor, AirCrushInterval, AirCrushPoint, AirDirection, AirProperties, Chart,
+    ChartError, ExDirection, Lane, Note, NoteId, NoteKind, Position, ScrollScope,
+    ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange, report_loss,
 };
 use thiserror::Error;
 
@@ -179,7 +179,11 @@ fn write_note(
             let (end_lane, end_width) = c2s_lane(end.lane())?;
             format!(
                 "ALD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{:.6}\t{}\t{end_lane}\t{end_width}\t{:.6}\t{}",
-                interval.map(output_ticks).transpose()?.unwrap_or(9600),
+                match interval {
+                    AirCrushInterval::Trace => 0,
+                    AirCrushInterval::Start => 9600,
+                    AirCrushInterval::Every(interval) => output_ticks(*interval)?,
+                },
                 points[0].height(),
                 duration_ticks(note.position(), end.position())?,
                 end.height(),
@@ -1063,9 +1067,13 @@ impl Parser {
             })?,
         )?;
         let parent = self.air_crush_parent(line, start, lane)?;
-        let interval = (interval < 9600)
-            .then(|| Position::new(interval, 96).map_err(|source| C2sError::Chart { line, source }))
-            .transpose()?;
+        let interval = match interval {
+            0 => AirCrushInterval::Trace,
+            interval if interval < 9600 => AirCrushInterval::Every(
+                Position::new(interval, 96).map_err(|source| C2sError::Chart { line, source })?,
+            ),
+            _ => AirCrushInterval::Start,
+        };
         self.add_note(
             line,
             Note::new(
@@ -1294,8 +1302,8 @@ fn parse_u8(line: usize, value: &str) -> Result<u8, C2sError> {
 #[cfg(test)]
 mod tests {
     use chart::{
-        AirCrushColor, AirCrushPoint, Chart, Lane, Note, NoteKind, Position, ScrollScope,
-        ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange,
+        AirCrushColor, AirCrushInterval, AirCrushPoint, Chart, Lane, Note, NoteKind, Position,
+        ScrollScope, ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange,
     };
 
     use super::{parse, write};
@@ -1574,7 +1582,7 @@ mod tests {
                         AirCrushPoint::new(end, Lane::slider(4, 4).unwrap(), 6.0).unwrap(),
                     ],
                     color: AirCrushColor::Purple,
-                    interval: Some(Position::new(1, 4).unwrap()),
+                    interval: AirCrushInterval::Every(Position::new(1, 4).unwrap()),
                     parent: chart::NoteId::new(0),
                 },
             )
