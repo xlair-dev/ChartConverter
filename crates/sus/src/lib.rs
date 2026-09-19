@@ -39,7 +39,7 @@ pub fn parse(source: &str) -> Result<Chart, SusError> {
     Parser::new().parse(source)
 }
 
-/// Writes the basic central-lane chart model as a SUS document.
+/// Writes a chart as an XLAIR-compatible SUS document.
 pub fn write(chart: &Chart) -> Result<String, SusError> {
     if !chart.scroll_speed_changes().is_empty()
         || chart.notes().iter().enumerate().any(|(index, _)| {
@@ -67,8 +67,16 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
         });
     }
 
-    for (index, note) in chart.notes().iter().enumerate() {
-        let channel = channel(index)?;
+    let mut channel_index = 0;
+    for note in chart.notes() {
+        if matches!(
+            note.kind(),
+            NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. }
+        ) {
+            continue;
+        }
+        let channel = channel(channel_index)?;
+        channel_index += 1;
         match note.kind() {
             NoteKind::Tap(kind) => {
                 let (measure, tick) = output_position(note.position())?;
@@ -113,13 +121,13 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
             NoteKind::Slide { points } => {
                 add_slide_records(&mut records, points, channel)?;
             }
-            NoteKind::Mine
-            | NoteKind::Air { .. }
-            | NoteKind::AirHold { .. }
-            | NoteKind::AirSlide { .. } => {
+            NoteKind::Mine => {
                 return Err(SusError::UnsupportedNote {
                     note: "unsupported note kind".to_owned(),
                 });
+            }
+            NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. } => {
+                unreachable!("AIR notes are filtered before channel allocation");
             }
         }
     }
@@ -957,5 +965,35 @@ mod tests {
                 .iter()
                 .any(|note| note.lane() == Lane::Side(SideButton::RightLower))
         );
+    }
+
+    #[test]
+    fn intentionally_drops_air_notes_in_xlair_output() {
+        let mut chart = Chart::new();
+        let position = Position::new(0, 1).unwrap();
+        let parent = chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::Tap(TapKind::Tap),
+            )
+            .unwrap(),
+        );
+        chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::Air {
+                    properties: chart::AirProperties::new(chart::AirDirection::Up),
+                    parent,
+                },
+            )
+            .unwrap(),
+        );
+
+        let sus = write(&chart).expect("AIR is intentionally omitted in XLAIR output");
+        let parsed = parse(&sus).expect("valid XLAIR output");
+        assert_eq!(parsed.notes().len(), 1);
+        assert_eq!(parsed.notes()[0].kind(), &NoteKind::Tap(TapKind::Tap));
     }
 }
