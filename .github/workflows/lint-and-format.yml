@@ -1,0 +1,68 @@
+name: Cargo Lint and Format
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - renovate.json
+      - Cargo.lock
+      - Cargo.toml
+      - crates/**
+      - rust-toolchain.toml
+      - rustfmt.toml
+      - .github/workflows/lint-and-format.yml
+      - .github/workflows/**
+  pull_request:
+    paths:
+      - renovate.json
+      - Cargo.lock
+      - Cargo.toml
+      - crates/**
+      - rust-toolchain.toml
+      - rustfmt.toml
+      - .github/workflows/lint-and-format.yml
+      - .github/workflows/**
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint_format:
+    name: cargo fmt & clippy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo directories
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lint-
+
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+
+      - name: Run cargo fmt check
+        run: cargo fmt --all -- --check
+
+      - name: Install cargo-sort
+        run: cargo install cargo-sort
+
+      - name: Run cargo sort check
+        run: cargo sort --check --workspace
+
+      - name: Run cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

@@ -1,0 +1,1 @@
+//! Shared chart domain model.
