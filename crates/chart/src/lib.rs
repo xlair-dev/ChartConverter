@@ -10,8 +10,8 @@ mod timing;
 pub use chart::{Chart, NoteId};
 pub use error::ChartError;
 pub use note::{
-    AirColor, AirDirection, AirProperties, ExDirection, Lane, Note, NoteKind, SideButton,
-    SlidePoint, TapKind,
+    AirColor, AirCrushPoint, AirDirection, AirProperties, ExDirection, Lane, Note, NoteKind,
+    SideButton, SlidePoint, TapKind,
 };
 pub use position::Position;
 pub use timeline::MeasureTimeline;

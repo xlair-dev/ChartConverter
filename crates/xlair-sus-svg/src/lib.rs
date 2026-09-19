@@ -63,6 +63,10 @@ fn note_end_position(note: &Note) -> f64 {
             .last()
             .map(|point| position_value(point.position()))
             .unwrap_or_else(|| position_value(note.position())),
+        NoteKind::AirCrush { points, .. } => points
+            .last()
+            .map(|point| position_value(point.position()))
+            .unwrap_or_else(|| position_value(note.position())),
         _ => position_value(note.position()),
     }
 }
@@ -109,6 +113,7 @@ fn render_note(svg: &mut String, note: &Note) {
             line(svg, "air-hold", note.lane(), start_y, y_position(*end))
         }
         NoteKind::AirSlide { points, .. } => polyline(svg, "air-slide", points),
+        NoteKind::AirCrush { points, .. } => polyline_air_crush(svg, "air-crush", points),
     }
 }
 
@@ -129,6 +134,19 @@ fn line(svg: &mut String, class: &str, lane: Lane, start_y: f64, end_y: f64) {
 }
 
 fn polyline(svg: &mut String, class: &str, points: &[chart::SlidePoint]) {
+    svg.push_str(&format!(r#"<polyline class="note {class}" points=""#));
+    for point in points {
+        let _ = write!(
+            svg,
+            "{:.2},{:.2} ",
+            lane_x(point.lane()),
+            y_position(point.position())
+        );
+    }
+    svg.push_str("\" fill=\"none\" stroke=\"#4c6fff\" stroke-width=\"6\"/>");
+}
+
+fn polyline_air_crush(svg: &mut String, class: &str, points: &[chart::AirCrushPoint]) {
     svg.push_str(&format!(r#"<polyline class="note {class}" points=""#));
     for point in points {
         let _ = write!(
