@@ -94,6 +94,14 @@ impl Chart {
             .append_slide_point(point)
     }
 
+    pub fn replace_note(&mut self, note_id: NoteId, note: Note) -> Result<(), ChartError> {
+        *self
+            .notes
+            .get_mut(note_id.value() as usize)
+            .ok_or(ChartError::InvalidNoteId)? = note;
+        Ok(())
+    }
+
     pub fn set_note_speed_group(
         &mut self,
         note_id: NoteId,

@@ -127,7 +127,31 @@ fn write_note(chart: &Chart, note_id: NoteId, note: &Note) -> Result<OutputRecor
         NoteKind::Air { parent, .. }
         | NoteKind::AirHold { parent, .. }
         | NoteKind::AirSlide { parent, .. } => (Some(*parent), write_air_note(note, &prefix)?),
-        _ => (None, write_non_air_note(note, &prefix, lane, width)?),
+        _ => {
+            let ex_direction = match note.kind() {
+                NoteKind::ExHold { direction, .. } | NoteKind::ExSlide { direction, .. } => {
+                    Some(*direction)
+                }
+                _ => None,
+            };
+            let include_ex_carrier = ex_direction.is_some_and(|direction| {
+                !chart.notes().iter().enumerate().any(|(index, candidate)| {
+                    index != note_id.value() as usize
+                        && candidate.position() == note.position()
+                        && candidate.lane() == note.lane()
+                        && matches!(
+                            candidate.kind(),
+                            NoteKind::ExTap {
+                                direction: candidate_direction
+                            } if *candidate_direction == direction
+                        )
+                })
+            });
+            (
+                None,
+                write_non_air_note(note, &prefix, lane, width, include_ex_carrier)?,
+            )
+        }
     };
     if let Some(parent) = parent {
         let parent_note = chart.note(parent).map_err(|_| UgcError::InvalidValue {
@@ -158,7 +182,13 @@ fn write_note(chart: &Chart, note_id: NoteId, note: &Note) -> Result<OutputRecor
     })
 }
 
-fn write_non_air_note(note: &Note, prefix: &str, lane: u8, width: u8) -> Result<String, UgcError> {
+fn write_non_air_note(
+    note: &Note,
+    prefix: &str,
+    lane: u8,
+    width: u8,
+    include_ex_carrier: bool,
+) -> Result<String, UgcError> {
     let text = match note.kind() {
         NoteKind::Tap(kind) => {
             let type_code = match kind {
@@ -197,6 +227,27 @@ fn write_non_air_note(note: &Note, prefix: &str, lane: u8, width: u8) -> Result<
                 encode_base36(width),
             )
         }
+        NoteKind::ExHold { end, direction } => {
+            let offset = relative_tick(note.position(), *end)?;
+            let carrier = if include_ex_carrier {
+                format!(
+                    "{prefix}x{}{}{}\n",
+                    encode_base36(lane),
+                    encode_base36(width),
+                    encode_ex_direction(*direction)
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "{carrier}{prefix}h{}{}\n#{}>s{}{}\n",
+                encode_base36(lane),
+                encode_base36(width),
+                offset,
+                encode_base36(lane),
+                encode_base36(width),
+            )
+        }
         NoteKind::Slide { points } => {
             let mut text = format!("{prefix}s{}{}\n", encode_base36(lane), encode_base36(width));
             for point in points.iter().skip(1) {
@@ -211,10 +262,33 @@ fn write_non_air_note(note: &Note, prefix: &str, lane: u8, width: u8) -> Result<
             }
             text
         }
-        NoteKind::ExHold { .. } | NoteKind::ExSlide { .. } => {
-            return Err(UgcError::UnsupportedNote {
-                note: "ExLong".to_owned(),
-            });
+        NoteKind::ExSlide { points, direction } => {
+            let carrier = if include_ex_carrier {
+                format!(
+                    "{prefix}x{}{}{}\n",
+                    encode_base36(lane),
+                    encode_base36(width),
+                    encode_ex_direction(*direction)
+                )
+            } else {
+                String::new()
+            };
+            let mut text = format!(
+                "{carrier}{prefix}s{}{}\n",
+                encode_base36(lane),
+                encode_base36(width),
+            );
+            for point in points.iter().skip(1) {
+                let (point_lane, point_width) = central_lane(point.lane())?;
+                let offset = relative_tick(note.position(), point.position())?;
+                text.push_str(&format!(
+                    "#{}>s{}{}\n",
+                    offset,
+                    encode_base36(point_lane),
+                    encode_base36(point_width),
+                ));
+            }
+            text
         }
         NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. } => {
             unreachable!("AIR notes are written by write_air_note")
@@ -453,24 +527,89 @@ impl Parser {
             }
             let (consumed, note) = self.parse_note(line_number, line, &lines[index + 1..])?;
             if let Some(note) = note {
-                let is_air = matches!(
-                    note.kind(),
-                    NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. }
-                );
-                let note_id = self.chart.add_note(note);
-                self.chart
-                    .set_note_speed_group(note_id, self.current_speed_group)
-                    .map_err(|source| UgcError::Chart {
+                if let Some((carrier_id, direction)) = self.ex_long_carrier(&note) {
+                    let note = ex_long_note(note, direction).map_err(|source| UgcError::Chart {
                         line: line_number,
                         source,
                     })?;
-                if !is_air {
-                    self.last_parent = Some(note_id);
+                    if self.has_air_child(carrier_id) {
+                        let note_id = self.chart.add_note(note);
+                        self.chart
+                            .set_note_speed_group(note_id, self.current_speed_group)
+                            .map_err(|source| UgcError::Chart {
+                                line: line_number,
+                                source,
+                            })?;
+                        self.last_parent = Some(note_id);
+                    } else {
+                        self.chart
+                            .replace_note(carrier_id, note)
+                            .map_err(|source| UgcError::Chart {
+                                line: line_number,
+                                source,
+                            })?;
+                        self.last_parent = Some(carrier_id);
+                    }
+                } else {
+                    let is_air = matches!(
+                        note.kind(),
+                        NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. }
+                    );
+                    let note_id = self.chart.add_note(note);
+                    self.chart
+                        .set_note_speed_group(note_id, self.current_speed_group)
+                        .map_err(|source| UgcError::Chart {
+                            line: line_number,
+                            source,
+                        })?;
+                    if !is_air {
+                        self.last_parent = Some(note_id);
+                    }
                 }
             }
             index += consumed + 1;
         }
         Ok(self.chart)
+    }
+
+    fn ex_long_carrier(&self, note: &Note) -> Option<(NoteId, ExDirection)> {
+        if !matches!(note.kind(), NoteKind::Hold { .. } | NoteKind::Slide { .. }) {
+            return None;
+        }
+        self.chart
+            .notes()
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, carrier)| {
+                (carrier.position() == note.position()
+                    && carrier.lane() == note.lane()
+                    && matches!(carrier.kind(), NoteKind::ExTap { .. }))
+                .then(|| {
+                    let direction = match carrier.kind() {
+                        NoteKind::ExTap { direction } => *direction,
+                        _ => unreachable!(),
+                    };
+                    (NoteId::new(index as u32), direction)
+                })
+            })
+    }
+
+    fn has_air_child(&self, parent: NoteId) -> bool {
+        self.chart.notes().iter().any(|note| {
+            matches!(
+                note.kind(),
+                NoteKind::Air { parent: note_parent, .. }
+                    | NoteKind::AirHold {
+                        parent: note_parent,
+                        ..
+                    }
+                    | NoteKind::AirSlide {
+                        parent: note_parent,
+                        ..
+                    } if *note_parent == parent
+            )
+        })
     }
 
     fn parse_header(&mut self, line: usize, text: &str) -> Result<(), UgcError> {
@@ -827,6 +966,17 @@ impl Parser {
     }
 }
 
+fn ex_long_note(note: Note, direction: ExDirection) -> Result<Note, ChartError> {
+    let position = note.position();
+    let lane = note.lane();
+    let kind = match note.kind().clone() {
+        NoteKind::Hold { end } => NoteKind::ExHold { end, direction },
+        NoteKind::Slide { points } => NoteKind::ExSlide { points, direction },
+        _ => unreachable!("ExLong conversion requires a hold or slide"),
+    };
+    Note::new(position, lane, kind)
+}
+
 fn split_directive(line: &str) -> Result<(&str, &str), UgcError> {
     let Some((tag, value)) = line.split_once('\t') else {
         return Ok((line, ""));
@@ -985,7 +1135,9 @@ fn parse_u32(line: usize, value: &str) -> Result<u32, UgcError> {
 
 #[cfg(test)]
 mod tests {
-    use chart::{Chart, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, TapKind};
+    use chart::{
+        Chart, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, SlidePoint, TapKind,
+    };
 
     use super::{parse, write};
 
@@ -1127,6 +1279,58 @@ mod tests {
 
         let ugc = write(&chart).expect("valid extended output");
         assert_eq!(parse(&ugc).unwrap().notes(), chart.notes());
+    }
+
+    #[test]
+    fn writes_and_parses_ex_long_carriers() {
+        let mut chart = Chart::new();
+        let start = Position::new(1, 1).unwrap();
+        let middle = Position::new(2, 1).unwrap();
+        let end = Position::new(3, 1).unwrap();
+        chart.add_note(
+            Note::new(
+                start,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::ExHold {
+                    end: middle,
+                    direction: chart::ExDirection::Inward,
+                },
+            )
+            .unwrap(),
+        );
+        chart.add_note(
+            Note::new(
+                middle,
+                Lane::slider(4, 4).unwrap(),
+                NoteKind::ExSlide {
+                    points: vec![
+                        SlidePoint::new(middle, Lane::slider(4, 4).unwrap()),
+                        SlidePoint::new(end, Lane::slider(8, 4).unwrap()),
+                    ],
+                    direction: chart::ExDirection::Left,
+                },
+            )
+            .unwrap(),
+        );
+
+        let ugc = write(&chart).expect("valid UGC output");
+        assert!(ugc.contains(":x04I"));
+        assert!(ugc.contains(":s44"));
+        let parsed = parse(&ugc).expect("round-tripped UGC output");
+        assert_eq!(parsed.notes(), chart.notes());
+    }
+
+    #[test]
+    fn preserves_an_ex_carrier_that_has_an_air_child() {
+        let source = "@ENDHEAD\n#0'0:x04U\n#0'0:a04UC\n#0'0:h04\n#480>s04\n";
+        let chart = parse(source).expect("valid ExLong carrier with AIR");
+
+        assert!(matches!(chart.notes()[0].kind(), NoteKind::ExTap { .. }));
+        assert!(matches!(
+            chart.notes()[1].kind(),
+            NoteKind::Air { parent, .. } if *parent == chart::NoteId::new(0)
+        ));
+        assert!(matches!(chart.notes()[2].kind(), NoteKind::ExHold { .. }));
     }
 
     #[test]
