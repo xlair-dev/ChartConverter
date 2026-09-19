@@ -132,10 +132,13 @@ fn write_note(
             "HLD\t{measure}\t{tick}\t{lane}\t{width}\t{}",
             duration_ticks(note.position(), *end)?
         ),
-        NoteKind::ExHold { .. } | NoteKind::ExSlide { .. } => {
-            return Err(unsupported("ExLong is not supported yet"));
-        }
-        NoteKind::Slide { points } => write_slide(points)?,
+        NoteKind::ExHold { end, direction } => format!(
+            "HXD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}",
+            duration_ticks(note.position(), *end)?,
+            encode_ex_direction(*direction)
+        ),
+        NoteKind::Slide { points } => write_slide(points, None)?,
+        NoteKind::ExSlide { points, direction } => write_slide(points, Some(*direction))?,
         NoteKind::Air { properties, parent } => format!(
             "{}\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}",
             encode_air_direction(
@@ -199,7 +202,7 @@ fn write_note(
     Ok(())
 }
 
-fn write_slide(points: &[SlidePoint]) -> Result<String, C2sError> {
+fn write_slide(points: &[SlidePoint], direction: Option<ExDirection>) -> Result<String, C2sError> {
     if points.len() < 2 {
         return Err(unsupported("slide without an end point"));
     }
@@ -211,14 +214,19 @@ fn write_slide(points: &[SlidePoint]) -> Result<String, C2sError> {
             let (start_lane, start_width) = c2s_lane(segment[0].lane())?;
             let (end_lane, end_width) = c2s_lane(segment[1].lane())?;
             let kind = if index + 1 == points.len() - 1 {
-                "SLD"
+                if direction.is_some() { "SXD" } else { "SLD" }
             } else {
-                "SLC"
+                if direction.is_some() { "SXC" } else { "SLC" }
             };
-            Ok(format!(
+            let mut record = format!(
                 "{kind}\t{measure}\t{tick}\t{start_lane}\t{start_width}\t{}\t{end_lane}\t{end_width}",
                 duration_ticks(segment[0].position(), segment[1].position())?
-            ))
+            );
+            if let Some(direction) = direction {
+                record.push('\t');
+                record.push_str(encode_ex_direction(direction));
+            }
+            Ok(record)
         })
         .collect::<Result<Vec<_>, C2sError>>()
         .map(|records| records.join("\n"))
@@ -292,11 +300,11 @@ fn encode_ex_direction(direction: ExDirection) -> &'static str {
         ExDirection::Up => "UP",
         ExDirection::Down => "DW",
         ExDirection::Center => "CE",
-        ExDirection::All => "ALL",
-        ExDirection::Wide => "VLT",
+        ExDirection::All => "RC",
+        ExDirection::Wide => "LC",
         ExDirection::Left => "LS",
         ExDirection::Right => "RS",
-        ExDirection::Inward => "IN",
+        ExDirection::Inward => "BS",
     }
 }
 
@@ -368,13 +376,15 @@ impl Parser {
                 "MNE" => self.parse_mine(line, &fields)?,
                 "CHR" => self.parse_ex_tap(line, &fields)?,
                 "AIR" => self.parse_air(line, &fields)?,
-                "HLD" => self.parse_hold(line, &fields)?,
-                "SLD" | "SLC" => self.parse_slide(line, &fields)?,
+                "HLD" => self.parse_hold(line, &fields, None)?,
+                "HXD" => self.parse_hold(line, &fields, Some(6))?,
+                "SLD" | "SLC" => self.parse_slide(line, &fields, None)?,
+                "SXD" | "SXC" => self.parse_slide(line, &fields, Some(8))?,
                 "AHD" => self.parse_air_hold(line, &fields)?,
                 "ASD" => self.parse_air_slide(line, &fields)?,
                 "SLA" => self.parse_speed_assignment(line, &fields)?,
                 "SFL" | "SLP" => self.parse_scroll_speed(line, &fields)?,
-                "AHX" | "SXD" | "SXC" | "ALD" => {
+                "AHX" | "ALD" => {
                     return Err(C2sError::UnsupportedRecord {
                         line,
                         record: fields[0].to_owned(),
@@ -612,7 +622,12 @@ impl Parser {
         Ok(())
     }
 
-    fn parse_hold(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+    fn parse_hold(
+        &mut self,
+        line: usize,
+        fields: &[&str],
+        ex_direction_field: Option<usize>,
+    ) -> Result<(), C2sError> {
         let (measure, tick) = self.location(line, fields)?;
         let lane = self.lane(
             line,
@@ -632,12 +647,30 @@ impl Parser {
                 value: duration.to_string(),
             })?,
         )?;
-        let id = self.add_note(line, Note::new(start, lane, NoteKind::Hold { end }))?;
+        let kind = if let Some(field) = ex_direction_field {
+            NoteKind::ExHold {
+                end,
+                direction: parse_ex_direction(
+                    line,
+                    fields
+                        .get(field)
+                        .ok_or(C2sError::MalformedRecord { line })?,
+                )?,
+            }
+        } else {
+            NoteKind::Hold { end }
+        };
+        let id = self.add_note(line, Note::new(start, lane, kind))?;
         self.last_hold_parent = Some(id);
         Ok(())
     }
 
-    fn parse_slide(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+    fn parse_slide(
+        &mut self,
+        line: usize,
+        fields: &[&str],
+        ex_direction_field: Option<usize>,
+    ) -> Result<(), C2sError> {
         let (measure, tick) = self.location(line, fields)?;
         let start_lane = self.lane(
             line,
@@ -663,6 +696,16 @@ impl Parser {
             })?,
         )?;
         let end_point = SlidePoint::new(end, end_lane);
+        let direction = ex_direction_field
+            .map(|field| {
+                parse_ex_direction(
+                    line,
+                    fields
+                        .get(field)
+                        .ok_or(C2sError::MalformedRecord { line })?,
+                )
+            })
+            .transpose()?;
         if let Some(note_id) = self
             .chart
             .notes()
@@ -670,8 +713,16 @@ impl Parser {
             .enumerate()
             .rev()
             .find(|(_, note)| {
-                let NoteKind::Slide { points } = note.kind() else {
-                    return false;
+                let points = match (direction.is_some(), note.kind()) {
+                    (false, NoteKind::Slide { points }) => points,
+                    (
+                        true,
+                        NoteKind::ExSlide {
+                            points,
+                            direction: existing,
+                        },
+                    ) if Some(*existing) == direction => points,
+                    _ => return false,
                 };
                 points
                     .last()
@@ -680,16 +731,19 @@ impl Parser {
             .map(|(index, _)| NoteId::new(index as u32))
         {
             self.chart
-                .append_slide_point(note_id, end_point)
+                .append_slide_point(note_id, end_point.clone())
                 .map_err(|source| C2sError::Chart { line, source })?;
             self.last_slide_parent = Some(note_id);
             return Ok(());
         }
         let points = vec![SlidePoint::new(start, start_lane), end_point];
-        let id = self.add_note(
-            line,
-            Note::new(start, start_lane, NoteKind::Slide { points }),
-        )?;
+        let kind = direction.map_or(
+            NoteKind::Slide {
+                points: points.clone(),
+            },
+            |direction| NoteKind::ExSlide { points, direction },
+        );
+        let id = self.add_note(line, Note::new(start, start_lane, kind))?;
         self.last_slide_parent = Some(id);
         Ok(())
     }
@@ -896,11 +950,11 @@ fn parse_ex_direction(line: usize, value: &str) -> Result<ExDirection, C2sError>
         "UP" => Ok(ExDirection::Up),
         "DW" => Ok(ExDirection::Down),
         "CE" => Ok(ExDirection::Center),
-        "ALL" => Ok(ExDirection::All),
-        "VLT" => Ok(ExDirection::Wide),
+        "RC" | "ALL" => Ok(ExDirection::All),
+        "LC" | "VLT" => Ok(ExDirection::Wide),
         "LS" | "L" => Ok(ExDirection::Left),
         "RS" | "R" => Ok(ExDirection::Right),
-        "IN" | "I" => Ok(ExDirection::Inward),
+        "BS" | "IN" | "I" => Ok(ExDirection::Inward),
         _ => Err(C2sError::InvalidValue {
             line,
             value: value.to_owned(),
@@ -1137,6 +1191,45 @@ mod tests {
         let c2s = write(&chart).expect("valid C2S output");
         assert!(c2s.contains("SLC\t0\t0\t0\t4\t96\t4\t4"));
         assert!(c2s.contains("SLD\t0\t96\t4\t4\t96\t8\t4"));
+        let parsed = parse(&c2s).expect("round-tripped C2S output");
+        assert_eq!(parsed.notes(), chart.notes());
+    }
+
+    #[test]
+    fn writes_and_parses_ex_long_notes() {
+        let mut chart = Chart::new();
+        let start = Position::new(0, 1).unwrap();
+        let end = Position::new(1, 1).unwrap();
+        chart.add_note(
+            Note::new(
+                start,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::ExHold {
+                    end,
+                    direction: chart::ExDirection::Inward,
+                },
+            )
+            .expect("valid Ex Hold"),
+        );
+        let points = vec![
+            SlidePoint::new(end, Lane::slider(4, 4).unwrap()),
+            SlidePoint::new(Position::new(2, 1).unwrap(), Lane::slider(8, 4).unwrap()),
+        ];
+        chart.add_note(
+            Note::new(
+                points[0].position(),
+                points[0].lane(),
+                NoteKind::ExSlide {
+                    points,
+                    direction: chart::ExDirection::Inward,
+                },
+            )
+            .expect("valid Ex Slide"),
+        );
+
+        let c2s = write(&chart).expect("valid C2S output");
+        assert!(c2s.contains("HXD\t0\t0\t0\t4\t96\tBS"));
+        assert!(c2s.contains("SXD\t0\t96\t4\t4\t96\t8\t4\tBS"));
         let parsed = parse(&c2s).expect("round-tripped C2S output");
         assert_eq!(parsed.notes(), chart.notes());
     }
