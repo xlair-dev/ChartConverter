@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod tests {
     use super::{Lane, Note, NoteKind, SideButton, SlidePoint, TapKind};
-    use crate::{Beat, NoteId};
+    use crate::{NoteId, Position};
 
     #[test]
     fn rejects_a_hold_that_does_not_advance_in_time() {
-        let position = Beat::new(1, 0, 1).expect("valid beat");
+        let position = Position::new(1, 1).expect("valid position");
 
         assert!(
             Note::new(
@@ -19,7 +19,7 @@ mod tests {
 
     #[test]
     fn accepts_xlair_side_button_notes() {
-        let position = Beat::new(1, 0, 1).expect("valid beat");
+        let position = Position::new(1, 1).expect("valid position");
 
         assert!(
             Note::new(
@@ -33,7 +33,7 @@ mod tests {
 
     #[test]
     fn air_notes_keep_their_parent_reference() {
-        let position = Beat::new(1, 0, 1).expect("valid beat");
+        let position = Position::new(1, 1).expect("valid position");
 
         let note = Note::new(
             position,
@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn rejects_a_slide_with_only_one_point() {
-        let position = Beat::new(1, 0, 1).expect("valid beat");
+        let position = Position::new(1, 1).expect("valid position");
 
         assert!(
             Note::new(
@@ -72,8 +72,26 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn rejects_an_air_hold_that_does_not_advance_in_time() {
+        let position = Position::new(1, 1).expect("valid position");
+
+        assert!(
+            Note::new(
+                position,
+                Lane::slider(0, 1).expect("valid lane"),
+                NoteKind::AirHold {
+                    end: position,
+                    direction: super::AirDirection::Up,
+                    parent: NoteId::new(0),
+                },
+            )
+            .is_err()
+        );
+    }
 }
-use crate::{Beat, ChartError, NoteId};
+use crate::{ChartError, NoteId, Position};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Lane {
@@ -120,16 +138,16 @@ pub enum AirDirection {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlidePoint {
-    position: Beat,
+    position: Position,
     lane: Lane,
 }
 
 impl SlidePoint {
-    pub fn new(position: Beat, lane: Lane) -> Self {
+    pub fn new(position: Position, lane: Lane) -> Self {
         Self { position, lane }
     }
 
-    pub fn position(&self) -> Beat {
+    pub fn position(&self) -> Position {
         self.position
     }
 
@@ -142,7 +160,7 @@ impl SlidePoint {
 pub enum NoteKind {
     Tap(TapKind),
     Hold {
-        end: Beat,
+        end: Position,
     },
     Slide {
         points: Vec<SlidePoint>,
@@ -151,22 +169,37 @@ pub enum NoteKind {
         direction: AirDirection,
         parent: NoteId,
     },
+    AirHold {
+        end: Position,
+        direction: AirDirection,
+        parent: NoteId,
+    },
+    AirSlide {
+        points: Vec<SlidePoint>,
+        direction: AirDirection,
+        parent: NoteId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Note {
-    position: Beat,
+    position: Position,
     lane: Lane,
     kind: NoteKind,
 }
 
 impl Note {
-    pub fn new(position: Beat, lane: Lane, kind: NoteKind) -> Result<Self, ChartError> {
+    pub fn new(position: Position, lane: Lane, kind: NoteKind) -> Result<Self, ChartError> {
         match &kind {
             NoteKind::Hold { end } if *end <= position => {
                 return Err(ChartError::InvalidHoldEnd);
             }
-            NoteKind::Slide { points } => validate_slide(position, lane, points)?,
+            NoteKind::Slide { points } | NoteKind::AirSlide { points, .. } => {
+                validate_slide(position, lane, points)?;
+            }
+            NoteKind::AirHold { end, .. } if *end <= position => {
+                return Err(ChartError::InvalidHoldEnd);
+            }
             _ => {}
         }
 
@@ -177,7 +210,7 @@ impl Note {
         })
     }
 
-    pub fn position(&self) -> Beat {
+    pub fn position(&self) -> Position {
         self.position
     }
 
@@ -190,7 +223,7 @@ impl Note {
     }
 }
 
-fn validate_slide(position: Beat, lane: Lane, points: &[SlidePoint]) -> Result<(), ChartError> {
+fn validate_slide(position: Position, lane: Lane, points: &[SlidePoint]) -> Result<(), ChartError> {
     if points.len() < 2 {
         return Err(ChartError::InvalidSlidePointCount);
     }

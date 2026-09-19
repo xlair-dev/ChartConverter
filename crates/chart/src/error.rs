@@ -2,10 +2,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum ChartError {
-    #[error("beat denominator must be greater than zero")]
-    InvalidBeatDenominator,
-    #[error("beat numerator must be less than denominator")]
-    InvalidBeatFraction,
+    #[error("position denominator must be greater than zero")]
+    InvalidPositionDenominator,
+    #[error("position arithmetic overflowed")]
+    PositionOverflow,
+    #[error("measure offset must be between zero and one")]
+    InvalidMeasureOffset,
     #[error("slider lane must fit within the sixteen central lanes")]
     InvalidSliderLane,
     #[error("slider lane width must be greater than zero")]
