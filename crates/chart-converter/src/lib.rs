@@ -8,8 +8,11 @@ use thiserror::Error;
 /// A chart format supported by the converter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
+    /// The C2S format.
     C2s,
+    /// The XLAIR-compatible SUS subset implemented by the `sus` crate.
     Sus,
+    /// The supported UGC subset implemented by the `ugc` crate.
     Ugc,
 }
 
