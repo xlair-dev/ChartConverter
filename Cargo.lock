@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "c2s"
+version = "0.1.0"
+dependencies = [
+ "chart",
+ "thiserror",
+]
+
+[[package]]
 name = "chart"
 version = "0.1.0"
 dependencies = [
