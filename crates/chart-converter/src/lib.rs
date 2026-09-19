@@ -62,9 +62,23 @@ pub enum FormatError {
     Ugc(#[from] ugc::UgcError),
 }
 
+#[derive(Debug, Error)]
+pub enum SourceEncodingError {
+    #[error("source is not valid UTF-8")]
+    Utf8(#[from] std::str::Utf8Error),
+    #[error("source contains invalid UTF-16")]
+    Utf16,
+}
+
 /// Errors returned by a format-independent conversion operation.
 #[derive(Debug, Error)]
 pub enum ConverterError {
+    #[error("failed to decode {format} chart: {source}")]
+    Encoding {
+        format: Format,
+        #[source]
+        source: SourceEncodingError,
+    },
     #[error("failed to parse {format} chart: {source}")]
     Parse {
         format: Format,
@@ -77,6 +91,13 @@ pub enum ConverterError {
         #[source]
         source: FormatError,
     },
+}
+
+/// Parses a chart from a text file, accepting UTF-8 and BOM-marked UTF-16.
+pub fn parse_bytes(format: Format, source: &[u8]) -> Result<Chart, ConverterError> {
+    let source =
+        decode_source(source).map_err(|source| ConverterError::Encoding { format, source })?;
+    parse(format, &source)
 }
 
 /// Parses a chart using the frontend for `format`.
@@ -111,11 +132,49 @@ pub fn convert(
     write(target_format, &chart)
 }
 
+/// Converts a chart file from one supported format to another.
+pub fn convert_bytes(
+    source_format: Format,
+    target_format: Format,
+    source: &[u8],
+) -> Result<String, ConverterError> {
+    let chart = parse_bytes(source_format, source)?;
+    write(target_format, &chart)
+}
+
+fn decode_source(source: &[u8]) -> Result<String, SourceEncodingError> {
+    if let Some(source) = source.strip_prefix(&[0xef, 0xbb, 0xbf]) {
+        return Ok(std::str::from_utf8(source)?.to_owned());
+    }
+    if let Some(source) = source.strip_prefix(&[0xff, 0xfe]) {
+        return decode_utf16(source, u16::from_le_bytes);
+    }
+    if let Some(source) = source.strip_prefix(&[0xfe, 0xff]) {
+        return decode_utf16(source, u16::from_be_bytes);
+    }
+    Ok(std::str::from_utf8(source)?.to_owned())
+}
+
+fn decode_utf16(
+    source: &[u8],
+    decode_unit: impl Fn([u8; 2]) -> u16,
+) -> Result<String, SourceEncodingError> {
+    let units = source
+        .chunks_exact(2)
+        .map(|chunk| decode_unit([chunk[0], chunk[1]]));
+    if !source.chunks_exact(2).remainder().is_empty() {
+        return Err(SourceEncodingError::Utf16);
+    }
+    char::decode_utf16(units)
+        .collect::<Result<String, _>>()
+        .map_err(|_| SourceEncodingError::Utf16)
+}
+
 #[cfg(test)]
 mod tests {
     use chart::{Chart, Lane, Note, NoteKind, Position, TapKind};
 
-    use super::{Format, convert, write};
+    use super::{Format, convert, parse_bytes, write};
 
     const FORMATS: [Format; 3] = [Format::C2s, Format::Sus, Format::Ugc];
 
@@ -184,5 +243,15 @@ mod tests {
             Format::Ugc,
             "@TICKS\t480\n@BEAT\t0\t4\t4\n@BPM\t0'0\t120\n@ENDHEAD\n#1'480:t04\n#1'960:h04\n#480>s04\n",
         );
+    }
+
+    #[test]
+    fn parses_bom_marked_utf16_c2s() {
+        let source = "RESOLUTION\t384\nTAP\t0\t0\t0\t4\n";
+        let mut bytes = vec![0xff, 0xfe];
+        bytes.extend(source.encode_utf16().flat_map(u16::to_le_bytes));
+
+        let chart = parse_bytes(Format::C2s, &bytes).expect("valid UTF-16LE C2S");
+        assert_eq!(chart.notes().len(), 1);
     }
 }
