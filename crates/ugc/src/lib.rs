@@ -337,9 +337,9 @@ fn write_air_note(note: &Note, prefix: &str) -> Result<String, UgcError> {
             ))
         }
         NoteKind::AirSlide { points, color, .. } => {
-            if points.len() != 2 {
+            if points.len() < 2 {
                 return Err(UgcError::UnsupportedNote {
-                    note: "multi-segment AIR Slide".to_owned(),
+                    note: "AIR Slide without an end point".to_owned(),
                 });
             }
             let (lane, width) = central_lane(note.lane())?;
@@ -349,18 +349,23 @@ fn write_air_note(note: &Note, prefix: &str) -> Result<String, UgcError> {
                     .map_err(|source| UgcError::Chart { line: 0, source })?
                     .with_color(*color),
             )?;
-            let end = &points[1];
-            let (end_lane, end_width) = central_lane(end.lane())?;
-            Ok(format!(
-                "{prefix}S{}{}{}\n#{}>s{}{}{}\n",
+            let mut text = format!(
+                "{prefix}S{}{}{}\n",
                 encode_base36(lane),
                 encode_base36(width),
-                attributes,
-                relative_tick(note.position(), end.position())?,
-                encode_base36(end_lane),
-                encode_base36(end_width),
-                encode_air_height(end.height())?
-            ))
+                attributes
+            );
+            for point in points.iter().skip(1) {
+                let (point_lane, point_width) = central_lane(point.lane())?;
+                text.push_str(&format!(
+                    "#{}>s{}{}{}\n",
+                    relative_tick(note.position(), point.position())?,
+                    encode_base36(point_lane),
+                    encode_base36(point_width),
+                    encode_air_height(point.height())?
+                ));
+            }
+            Ok(text)
         }
         NoteKind::AirCrush {
             points,
@@ -1662,6 +1667,7 @@ mod tests {
             .unwrap(),
         );
         let start = Position::new(1, 1).unwrap();
+        let middle = Position::new(3, 2).unwrap();
         let end = Position::new(2, 1).unwrap();
         chart.add_note(
             Note::new(
@@ -1670,6 +1676,7 @@ mod tests {
                 NoteKind::AirSlide {
                     points: vec![
                         chart::AirPoint::new(start, Lane::slider(4, 4).unwrap(), 2.0).unwrap(),
+                        chart::AirPoint::new(middle, Lane::slider(6, 4).unwrap(), 2.25).unwrap(),
                         chart::AirPoint::new(end, Lane::slider(8, 4).unwrap(), 2.5).unwrap(),
                     ],
                     color: chart::AirColor::Normal,
