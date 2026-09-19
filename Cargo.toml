@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/c2s",
     "crates/chart",
+    "crates/chart-converter",
     "crates/sus",
     "crates/ugc",
     "crates/xlair-sus-svg",
