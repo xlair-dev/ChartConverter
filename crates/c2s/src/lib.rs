@@ -524,25 +524,22 @@ impl Parser {
         if self.resolution.is_none() {
             return Err(C2sError::MissingResolution);
         }
-        for (line, position, lane, duration, group) in self.speed_assignments {
-            let note_id = self
-                .chart
-                .notes()
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, note)| {
-                    note.position() == position
-                        && note.lane() == lane
-                        && note_duration_ticks(note).ok() == Some(duration)
-                })
-                .map(|(index, _)| NoteId::new(index as u32))
-                .ok_or(C2sError::InvalidValue {
-                    line,
-                    value: "SLA without a matching note".to_owned(),
-                })?;
+        // C2S uses SLA duration as a lower bound; unmatched auxiliary records are ignorable.
+        for index in 0..self.chart.notes().len() {
+            let Some((line, group)) = self.speed_assignments.iter().find_map(
+                |(line, position, lane, duration, group)| {
+                    (self.chart.notes()[index].position() == *position
+                        && self.chart.notes()[index].lane() == *lane
+                        && note_duration_ticks(&self.chart.notes()[index])
+                            .ok()
+                            .is_some_and(|note_duration| note_duration <= *duration))
+                    .then_some((*line, *group))
+                },
+            ) else {
+                continue;
+            };
             self.chart
-                .set_note_speed_group(note_id, Some(group))
+                .set_note_speed_group(NoteId::new(index as u32), Some(group))
                 .map_err(|source| C2sError::Chart { line, source })?;
         }
         Ok(self.chart)
@@ -1485,6 +1482,15 @@ mod tests {
         let parsed = parse(&c2s).expect("round-tripped C2S output");
         assert_eq!(parsed.note_speed_group(note_id).unwrap(), Some(7));
         assert_eq!(parsed.scroll_speed_changes(), chart.scroll_speed_changes());
+    }
+
+    #[test]
+    fn ignores_short_speed_assignments_for_long_notes() {
+        let source = "RESOLUTION\t384\nTAP\t0\t0\t7\t2\nALD\t0\t96\t7\t2\t0\t1.0\t96\t7\t2\t1.0\tDEF\nSLA\t0\t96\t7\t2\t1\t1\n";
+        let chart = parse(source).expect("unmatched SLA records are ignorable");
+
+        assert_eq!(chart.notes().len(), 2);
+        assert_eq!(chart.note_speed_group(chart::NoteId::new(1)).unwrap(), None);
     }
 
     #[test]
