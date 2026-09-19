@@ -1,6 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use super::{AirColor, AirProperties, Lane, Note, NoteKind, SideButton, SlidePoint, TapKind};
+    use super::{
+        AirColor, AirCrushColor, AirProperties, Lane, Note, NoteKind, SideButton, SlidePoint,
+        TapKind,
+    };
     use crate::{AirCrushPoint, ExDirection, NoteId, Position};
 
     #[test]
@@ -144,7 +147,7 @@ mod tests {
             lane,
             NoteKind::AirCrush {
                 points,
-                color: AirColor::Normal,
+                color: AirCrushColor::Normal,
                 interval: Some(Position::new(1, 4).unwrap()),
                 parent: NoteId::new(0),
             },
@@ -161,7 +164,7 @@ mod tests {
                         AirCrushPoint::new(start, lane, 5.0).unwrap(),
                         AirCrushPoint::new(end, Lane::slider(4, 4).unwrap(), 6.0).unwrap(),
                     ],
-                    color: AirColor::Normal,
+                    color: AirCrushColor::Normal,
                     interval: Some(Position::new(0, 1).unwrap()),
                     parent: NoteId::new(0),
                 },
@@ -231,6 +234,26 @@ pub enum AirDirection {
 pub enum AirColor {
     Normal,
     Inverted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AirCrushColor {
+    Normal,
+    Transparent,
+    Red,
+    Orange,
+    Yellow,
+    Lime,
+    Green,
+    Aqua,
+    Cyan,
+    DarkBlue,
+    Blue,
+    Violet,
+    Purple,
+    Pink,
+    Gray,
+    Black,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -343,7 +366,7 @@ pub enum NoteKind {
     },
     AirCrush {
         points: Vec<AirCrushPoint>,
-        color: AirColor,
+        color: AirCrushColor,
         /// `None` represents UGC's `$` interval, which keeps the combo at the start.
         interval: Option<Position>,
         parent: NoteId,
