@@ -82,7 +82,10 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
     for (note_index, note) in chart.notes().iter().enumerate() {
         if matches!(
             note.kind(),
-            NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. }
+            NoteKind::Air { .. }
+                | NoteKind::AirHold { .. }
+                | NoteKind::AirSlide { .. }
+                | NoteKind::AirCrush { .. }
         ) {
             continue;
         }
