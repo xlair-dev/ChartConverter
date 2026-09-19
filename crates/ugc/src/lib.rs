@@ -1,9 +1,9 @@
 //! Parser and writer for the shared subset of the UGC chart format.
 
 use chart::{
-    AirColor, AirDirection, AirProperties, Chart, ChartError, ExDirection, Lane, MeasureTimeline,
-    Note, NoteId, NoteKind, Position, ScrollScope, ScrollSpeedChange, SlidePoint, TapKind,
-    TempoChange,
+    AirColor, AirCrushColor, AirCrushPoint, AirDirection, AirProperties, Chart, ChartError,
+    ExDirection, Lane, MeasureTimeline, Note, NoteId, NoteKind, Position, ScrollScope,
+    ScrollSpeedChange, SlidePoint, TapKind, TempoChange,
 };
 use thiserror::Error;
 
@@ -121,12 +121,16 @@ fn write_note(chart: &Chart, note_id: NoteId, note: &Note) -> Result<OutputRecor
     let prefix = format!("#{measure}'{tick}:");
     let is_air = matches!(
         note.kind(),
-        NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. }
+        NoteKind::Air { .. }
+            | NoteKind::AirHold { .. }
+            | NoteKind::AirSlide { .. }
+            | NoteKind::AirCrush { .. }
     );
     let (parent, text) = match note.kind() {
         NoteKind::Air { parent, .. }
         | NoteKind::AirHold { parent, .. }
-        | NoteKind::AirSlide { parent, .. } => (Some(*parent), write_air_note(note, &prefix)?),
+        | NoteKind::AirSlide { parent, .. }
+        | NoteKind::AirCrush { parent, .. } => (Some(*parent), write_air_note(note, &prefix)?),
         _ => {
             let ex_direction = match note.kind() {
                 NoteKind::ExHold { direction, .. } | NoteKind::ExSlide { direction, .. } => {
@@ -362,9 +366,39 @@ fn write_air_note(note: &Note, prefix: &str) -> Result<String, UgcError> {
                 end_height
             ))
         }
-        NoteKind::AirCrush { .. } => Err(UgcError::UnsupportedNote {
-            note: "AIR Crush".to_owned(),
-        }),
+        NoteKind::AirCrush {
+            points,
+            color,
+            interval,
+            ..
+        } => {
+            let (lane, width) = central_lane(note.lane())?;
+            let start = &points[0];
+            let interval = interval
+                .map(|interval| relative_tick(Position::new(0, 1).unwrap(), interval))
+                .transpose()?
+                .map_or_else(|| "$".to_owned(), |interval| interval.to_string());
+            let mut text = format!(
+                "{prefix}C{}{}{}{},{}\n",
+                encode_base36(lane),
+                encode_base36(width),
+                encode_air_height(start.height())?,
+                encode_air_crush_color(*color),
+                interval
+            );
+            for point in points.iter().skip(1) {
+                let (point_lane, point_width) = central_lane(point.lane())?;
+                let offset = relative_tick(note.position(), point.position())?;
+                text.push_str(&format!(
+                    "#{}>c{}{}{}\n",
+                    offset,
+                    encode_base36(point_lane),
+                    encode_base36(point_width),
+                    encode_air_height(point.height())?
+                ));
+            }
+            Ok(text)
+        }
         _ => unreachable!("non-AIR note passed to write_air_note"),
     }
 }
@@ -458,6 +492,27 @@ fn encode_air_attributes(properties: AirProperties) -> Result<String, UgcError> 
         AirColor::Inverted => 'I',
     };
     Ok(format!("{}{}{}", direction.unwrap_or(""), height, color))
+}
+
+fn encode_air_crush_color(color: AirCrushColor) -> char {
+    match color {
+        AirCrushColor::Normal => '0',
+        AirCrushColor::Transparent => 'Z',
+        AirCrushColor::Red => '1',
+        AirCrushColor::Orange => '2',
+        AirCrushColor::Yellow => '3',
+        AirCrushColor::Lime => '4',
+        AirCrushColor::Green => '5',
+        AirCrushColor::Aqua => '6',
+        AirCrushColor::Cyan => '7',
+        AirCrushColor::DarkBlue => '8',
+        AirCrushColor::Blue => '9',
+        AirCrushColor::Violet => 'A',
+        AirCrushColor::Purple => 'Y',
+        AirCrushColor::Pink => 'B',
+        AirCrushColor::Gray => 'C',
+        AirCrushColor::Black => 'D',
+    }
 }
 
 fn encode_air_height(height: f64) -> Result<String, UgcError> {
@@ -561,7 +616,10 @@ impl Parser {
                 } else {
                     let is_air = matches!(
                         note.kind(),
-                        NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. }
+                        NoteKind::Air { .. }
+                            | NoteKind::AirHold { .. }
+                            | NoteKind::AirSlide { .. }
+                            | NoteKind::AirCrush { .. }
                     );
                     let note_id = self.chart.add_note(note);
                     self.chart
@@ -792,10 +850,7 @@ impl Parser {
             'H' | 'S' => {
                 self.parse_air_long(line, position, kind, &code[1..3], &code[3..], following)
             }
-            'C' => Err(UgcError::UnsupportedRecord {
-                line,
-                record: kind.to_string(),
-            }),
+            'C' => self.parse_air_crush(line, position, &code[1..3], &code[3..], following),
             'c' => Ok((0, None)),
             _ => Err(UgcError::UnsupportedRecord {
                 line,
@@ -835,6 +890,107 @@ impl Parser {
         let note = Note::new(position, lane, NoteKind::Air { properties, parent })
             .map_err(|source| UgcError::Chart { line, source })?;
         Ok((0, Some(note)))
+    }
+
+    fn parse_air_crush(
+        &self,
+        line: usize,
+        position: Position,
+        lane_code: &str,
+        attributes: &str,
+        following: &[&str],
+    ) -> Result<(usize, Option<Note>), UgcError> {
+        let parent = self.last_parent.ok_or(UgcError::InvalidValue {
+            line,
+            value: "AIR Crush without a parent note".to_owned(),
+        })?;
+        let lane = parse_lane(line, lane_code)?;
+        let (attributes, interval) = attributes.split_once(',').unwrap_or((attributes, ""));
+        if attributes.is_empty() {
+            return Err(UgcError::MalformedRecord { line });
+        }
+        let color = parse_air_crush_color(
+            line,
+            attributes
+                .get(attributes.len() - 1..)
+                .ok_or(UgcError::MalformedRecord { line })?,
+        )?;
+        let height = parse_air_height(
+            line,
+            attributes
+                .get(..attributes.len() - 1)
+                .ok_or(UgcError::MalformedRecord { line })?,
+        )?;
+        let interval = if interval.is_empty() || interval == "$" {
+            None
+        } else {
+            Some(
+                Position::new(parse_u64(line, interval)?, self.ticks_per_beat)
+                    .map_err(|source| UgcError::Chart { line, source })?,
+            )
+        };
+        let mut points = vec![
+            AirCrushPoint::new(position, lane, height)
+                .map_err(|source| UgcError::Chart { line, source })?,
+        ];
+        let mut consumed = 0;
+        for follower in following {
+            let follower = follower.trim();
+            let Some((offset, data)) = parse_follower(follower) else {
+                break;
+            };
+            if data.len() < 4 {
+                return Err(UgcError::MalformedRecord {
+                    line: line + consumed + 1,
+                });
+            }
+            let marker = data.as_bytes()[0] as char;
+            if marker != 'c' && marker != 's' {
+                return Err(UgcError::UnsupportedRecord {
+                    line: line + consumed + 1,
+                    record: marker.to_string(),
+                });
+            }
+            let endpoint = position
+                .checked_add(
+                    Position::new(offset, self.ticks_per_beat).map_err(|source| {
+                        UgcError::Chart {
+                            line: line + consumed + 1,
+                            source,
+                        }
+                    })?,
+                )
+                .map_err(|source| UgcError::Chart {
+                    line: line + consumed + 1,
+                    source,
+                })?;
+            let point_lane = parse_lane(line + consumed + 1, &data[1..3])?;
+            let point_height = parse_air_height(line + consumed + 1, &data[3..])?;
+            points.push(
+                AirCrushPoint::new(endpoint, point_lane, point_height).map_err(|source| {
+                    UgcError::Chart {
+                        line: line + consumed + 1,
+                        source,
+                    }
+                })?,
+            );
+            consumed += 1;
+        }
+        if points.len() == 1 {
+            return Err(UgcError::MissingFollower { line });
+        }
+        let note = Note::new(
+            position,
+            lane,
+            NoteKind::AirCrush {
+                points,
+                color,
+                interval,
+                parent,
+            },
+        )
+        .map_err(|source| UgcError::Chart { line, source })?;
+        Ok((consumed, Some(note)))
     }
 
     fn parse_air_long(
@@ -1054,6 +1210,31 @@ fn parse_air_direction(line: usize, value: &str) -> Result<AirDirection, UgcErro
     }
 }
 
+fn parse_air_crush_color(line: usize, value: &str) -> Result<AirCrushColor, UgcError> {
+    match value {
+        "0" => Ok(AirCrushColor::Normal),
+        "Z" => Ok(AirCrushColor::Transparent),
+        "1" => Ok(AirCrushColor::Red),
+        "2" => Ok(AirCrushColor::Orange),
+        "3" => Ok(AirCrushColor::Yellow),
+        "4" => Ok(AirCrushColor::Lime),
+        "5" => Ok(AirCrushColor::Green),
+        "6" => Ok(AirCrushColor::Aqua),
+        "7" => Ok(AirCrushColor::Cyan),
+        "8" => Ok(AirCrushColor::DarkBlue),
+        "9" => Ok(AirCrushColor::Blue),
+        "A" => Ok(AirCrushColor::Violet),
+        "Y" => Ok(AirCrushColor::Purple),
+        "B" => Ok(AirCrushColor::Pink),
+        "C" => Ok(AirCrushColor::Gray),
+        "D" => Ok(AirCrushColor::Black),
+        _ => Err(UgcError::InvalidValue {
+            line,
+            value: value.to_owned(),
+        }),
+    }
+}
+
 fn parse_air_properties(
     line: usize,
     direction: Option<AirDirection>,
@@ -1144,7 +1325,8 @@ fn parse_u32(line: usize, value: &str) -> Result<u32, UgcError> {
 #[cfg(test)]
 mod tests {
     use chart::{
-        Chart, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, SlidePoint, TapKind,
+        AirCrushColor, AirCrushPoint, Chart, Lane, Note, NoteKind, Position, ScrollScope,
+        ScrollSpeedChange, SlidePoint, TapKind,
     };
 
     use super::{parse, write};
@@ -1339,6 +1521,43 @@ mod tests {
             NoteKind::Air { parent, .. } if *parent == chart::NoteId::new(0)
         ));
         assert!(matches!(chart.notes()[2].kind(), NoteKind::ExHold { .. }));
+    }
+
+    #[test]
+    fn writes_and_parses_air_crush_notes() {
+        let mut chart = Chart::new();
+        let parent = chart.add_note(
+            Note::new(
+                Position::new(1, 1).unwrap(),
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::Tap(TapKind::Tap),
+            )
+            .unwrap(),
+        );
+        let start = Position::new(1, 1).unwrap();
+        let end = Position::new(2, 1).unwrap();
+        chart.add_note(
+            Note::new(
+                start,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::AirCrush {
+                    points: vec![
+                        AirCrushPoint::new(start, Lane::slider(0, 4).unwrap(), 5.0).unwrap(),
+                        AirCrushPoint::new(end, Lane::slider(4, 4).unwrap(), 6.0).unwrap(),
+                    ],
+                    color: AirCrushColor::Purple,
+                    interval: Some(Position::new(1, 4).unwrap()),
+                    parent,
+                },
+            )
+            .unwrap(),
+        );
+
+        let ugc = write(&chart).expect("valid UGC output");
+        assert!(ugc.contains("C04"));
+        assert!(ugc.contains(",120"));
+        let parsed = parse(&ugc).expect("round-tripped UGC output");
+        assert_eq!(parsed.notes(), chart.notes());
     }
 
     #[test]
