@@ -179,8 +179,7 @@ fn write_note(
         ),
         NoteKind::AirSlide {
             points,
-            properties,
-            end_height: Some(end_height),
+            color,
             parent,
         } => {
             if points.len() != 2 {
@@ -189,17 +188,13 @@ fn write_note(
             let end = &points[1];
             let (end_lane, end_width) = c2s_lane(end.lane())?;
             format!(
-                "ASD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}\t{}\t{end_lane}\t{end_width}\t{end_height:.6}\t{}",
+                "ASD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{:.6}\t{}\t{end_lane}\t{end_width}\t{:.6}\t{}",
                 parent_type(chart, *parent)?,
-                properties
-                    .height()
-                    .ok_or_else(|| unsupported("AIR Slide height is missing"))?,
+                points[0].height(),
                 duration_ticks(note.position(), end.position())?,
-                encode_air_color(properties.color())
+                end.height(),
+                encode_air_color(*color)
             )
-        }
-        NoteKind::AirSlide { .. } => {
-            return Err(unsupported("AIR Slide end height is missing"));
         }
     };
     records.push(Record::new(measure, tick, index, text));
@@ -306,9 +301,11 @@ fn note_duration_ticks(note: &Note) -> Result<u64, C2sError> {
         NoteKind::Hold { end } | NoteKind::ExHold { end, .. } | NoteKind::AirHold { end, .. } => {
             duration_ticks(note.position(), *end)
         }
-        NoteKind::Slide { points }
-        | NoteKind::ExSlide { points, .. }
-        | NoteKind::AirSlide { points, .. } => {
+        NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => {
+            let end = points.last().ok_or(C2sError::UnrepresentablePosition)?;
+            duration_ticks(note.position(), end.position())
+        }
+        NoteKind::AirSlide { points, .. } => {
             let end = points.last().ok_or(C2sError::UnrepresentablePosition)?;
             duration_ticks(note.position(), end.position())
         }
@@ -885,15 +882,12 @@ impl Parser {
                 value: duration.to_string(),
             })?,
         )?;
-        let properties = AirProperties::without_direction()
-            .with_height(height)
-            .map_err(|source| C2sError::Chart { line, source })?
-            .with_color(color);
         let points = vec![
-            SlidePoint::new(start, start_lane),
-            SlidePoint::new(end, end_lane),
+            chart::AirPoint::new(start, start_lane, height)
+                .map_err(|source| C2sError::Chart { line, source })?,
+            chart::AirPoint::new(end, end_lane, end_height)
+                .map_err(|source| C2sError::Chart { line, source })?,
         ];
-        let end_height = Some(end_height);
         self.add_note(
             line,
             Note::new(
@@ -901,8 +895,7 @@ impl Parser {
                 start_lane,
                 NoteKind::AirSlide {
                     points,
-                    properties,
-                    end_height,
+                    color,
                     parent,
                 },
             ),
@@ -1231,10 +1224,11 @@ mod tests {
             chart.notes()[3].kind(),
             NoteKind::AirSlide {
                 parent,
-                properties,
-                end_height: Some(2.5),
+                points,
                 ..
-            } if *parent == chart::NoteId::new(2) && properties.height() == Some(2.0)
+            } if *parent == chart::NoteId::new(2)
+                && points[0].height() == 2.0
+                && points[1].height() == 2.5
         ));
     }
 

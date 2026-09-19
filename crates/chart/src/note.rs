@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
     use super::{
-        AirColor, AirCrushColor, AirProperties, Lane, Note, NoteKind, SideButton, SlidePoint,
-        TapKind,
+        AirColor, AirCrushColor, AirCrushPoint, AirPoint, AirProperties, Lane, Note, NoteKind,
+        SideButton, SlidePoint, TapKind,
     };
-    use crate::{AirCrushPoint, ExDirection, NoteId, Position};
+    use crate::{ExDirection, NoteId, Position};
 
     #[test]
     fn rejects_a_hold_that_does_not_advance_in_time() {
@@ -171,6 +171,34 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn preserves_heights_on_air_slide_points() {
+        let start = Position::new(0, 1).unwrap();
+        let middle = Position::new(1, 2).unwrap();
+        let end = Position::new(1, 1).unwrap();
+        let start_lane = Lane::slider(0, 4).unwrap();
+        let points = vec![
+            AirPoint::new(start, start_lane, 2.0).unwrap(),
+            AirPoint::new(middle, Lane::slider(4, 4).unwrap(), 2.5).unwrap(),
+            AirPoint::new(end, Lane::slider(8, 4).unwrap(), 3.0).unwrap(),
+        ];
+        let note = Note::new(
+            start,
+            start_lane,
+            NoteKind::AirSlide {
+                points,
+                color: AirColor::Normal,
+                parent: NoteId::new(0),
+            },
+        )
+        .expect("valid AIR Slide");
+
+        let NoteKind::AirSlide { points, .. } = note.kind() else {
+            panic!("expected AIR Slide");
+        };
+        assert_eq!(points[1].height(), 2.5);
     }
 }
 use crate::{ChartError, NoteId, Position};
@@ -359,13 +387,12 @@ pub enum NoteKind {
         parent: NoteId,
     },
     AirSlide {
-        points: Vec<SlidePoint>,
-        properties: AirProperties,
-        end_height: Option<f64>,
+        points: Vec<AirPoint>,
+        color: AirColor,
         parent: NoteId,
     },
     AirCrush {
-        points: Vec<AirCrushPoint>,
+        points: Vec<AirPoint>,
         color: AirCrushColor,
         /// `None` represents UGC's `$` interval, which keeps the combo at the start.
         interval: Option<Position>,
@@ -386,11 +413,10 @@ impl Note {
             NoteKind::Hold { end } | NoteKind::ExHold { end, .. } if *end <= position => {
                 return Err(ChartError::InvalidHoldEnd);
             }
-            NoteKind::Slide { points }
-            | NoteKind::ExSlide { points, .. }
-            | NoteKind::AirSlide { points, .. } => {
+            NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => {
                 validate_slide(position, lane, points)?;
             }
+            NoteKind::AirSlide { points, .. } => validate_air_path(position, lane, points)?,
             NoteKind::AirHold { end, .. } if *end <= position => {
                 return Err(ChartError::InvalidHoldEnd);
             }
@@ -402,10 +428,10 @@ impl Note {
                 if *interval == Position::new(0, 1).expect("valid position") {
                     return Err(ChartError::InvalidAirCrushInterval);
                 }
-                validate_air_crush(position, lane, points)?;
+                validate_air_path(position, lane, points)?;
             }
             NoteKind::AirCrush { points, .. } => {
-                validate_air_crush(position, lane, points)?;
+                validate_air_path(position, lane, points)?;
             }
             _ => {}
         }
@@ -444,16 +470,32 @@ impl Note {
         points.push(point);
         Ok(())
     }
+
+    /// Appends a height-aware point to an AIR Slide while preserving its temporal invariants.
+    pub fn append_air_slide_point(&mut self, point: AirPoint) -> Result<(), ChartError> {
+        let points = match &mut self.kind {
+            NoteKind::AirSlide { points, .. } => points,
+            _ => return Err(ChartError::InvalidSlidePointCount),
+        };
+        if points
+            .last()
+            .is_some_and(|last| last.position() >= point.position())
+        {
+            return Err(ChartError::InvalidSlidePointOrder);
+        }
+        points.push(point);
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct AirCrushPoint {
+pub struct AirPoint {
     position: Position,
     lane: Lane,
     height: f64,
 }
 
-impl AirCrushPoint {
+impl AirPoint {
     pub fn new(position: Position, lane: Lane, height: f64) -> Result<Self, ChartError> {
         if !height.is_finite() || height < 0.0 {
             return Err(ChartError::InvalidAirHeight);
@@ -478,10 +520,16 @@ impl AirCrushPoint {
     }
 }
 
-fn validate_air_crush(
+/// Height-aware path point shared by AIR Slide and AIR Crush notes.
+pub type AirSlidePoint = AirPoint;
+
+/// Compatibility alias for the height-aware AIR Crush path point.
+pub type AirCrushPoint = AirPoint;
+
+fn validate_air_path(
     position: Position,
     lane: Lane,
-    points: &[AirCrushPoint],
+    points: &[AirPoint],
 ) -> Result<(), ChartError> {
     if points.len() < 2 {
         return Err(ChartError::InvalidSlidePointCount);

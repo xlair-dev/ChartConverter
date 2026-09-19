@@ -1,8 +1,8 @@
 //! Parser and writer for the shared subset of the UGC chart format.
 
 use chart::{
-    AirColor, AirCrushColor, AirCrushPoint, AirDirection, AirProperties, Chart, ChartError,
-    ExDirection, Lane, MeasureTimeline, Note, NoteId, NoteKind, Position, ScrollScope,
+    AirColor, AirCrushColor, AirCrushPoint, AirDirection, AirPoint, AirProperties, Chart,
+    ChartError, ExDirection, Lane, MeasureTimeline, Note, NoteId, NoteKind, Position, ScrollScope,
     ScrollSpeedChange, SlidePoint, TapKind, TempoChange,
 };
 use thiserror::Error;
@@ -336,25 +336,21 @@ fn write_air_note(note: &Note, prefix: &str) -> Result<String, UgcError> {
                 encode_base36(width)
             ))
         }
-        NoteKind::AirSlide {
-            points,
-            properties,
-            end_height,
-            ..
-        } => {
+        NoteKind::AirSlide { points, color, .. } => {
             if points.len() != 2 {
                 return Err(UgcError::UnsupportedNote {
                     note: "multi-segment AIR Slide".to_owned(),
                 });
             }
             let (lane, width) = central_lane(note.lane())?;
-            let attributes = encode_air_attributes(*properties)?;
+            let attributes = encode_air_attributes(
+                AirProperties::without_direction()
+                    .with_height(points[0].height())
+                    .map_err(|source| UgcError::Chart { line: 0, source })?
+                    .with_color(*color),
+            )?;
             let end = &points[1];
             let (end_lane, end_width) = central_lane(end.lane())?;
-            let end_height = end_height
-                .map(encode_air_height)
-                .transpose()?
-                .unwrap_or_default();
             Ok(format!(
                 "{prefix}S{}{}{}\n#{}>s{}{}{}\n",
                 encode_base36(lane),
@@ -363,7 +359,7 @@ fn write_air_note(note: &Note, prefix: &str) -> Result<String, UgcError> {
                 relative_tick(note.position(), end.position())?,
                 encode_base36(end_lane),
                 encode_base36(end_width),
-                end_height
+                encode_air_height(end.height())?
             ))
         }
         NoteKind::AirCrush {
@@ -548,6 +544,12 @@ struct Parser {
     in_header: bool,
     current_speed_group: Option<u32>,
     last_parent: Option<NoteId>,
+}
+
+struct ParsedLongNote {
+    consumed: usize,
+    note: Option<Note>,
+    air_points: Option<Vec<AirPoint>>,
 }
 
 impl Parser {
@@ -842,9 +844,9 @@ impl Parser {
                 Ok((0, Some(note)))
             }
             'h' | 's' => {
-                let (consumed, note, _) =
-                    self.parse_long_note(line, position, kind, &code[1..3], following, false)?;
-                Ok((consumed, note))
+                let parsed =
+                    self.parse_long_note(line, position, kind, &code[1..3], following, None)?;
+                Ok((parsed.consumed, parsed.note))
             }
             'a' => self.parse_air(line, position, &code[1..3], &code[3..]),
             'H' | 'S' => {
@@ -1007,14 +1009,17 @@ impl Parser {
             value: "AIR long note without a parent note".to_owned(),
         })?;
         let properties = parse_air_properties(line, None, attributes)?;
-        let (consumed, note, end_height) = self.parse_long_note(
+        let parsed = self.parse_long_note(
             line,
             position,
             if kind == 'H' { 'h' } else { 's' },
             lane_code,
             following,
-            true,
+            properties.height(),
         )?;
+        let consumed = parsed.consumed;
+        let note = parsed.note;
+        let air_points = parsed.air_points;
         let Some(note) = note else {
             return Ok((consumed, None));
         };
@@ -1024,10 +1029,9 @@ impl Parser {
                 properties,
                 parent,
             },
-            ('S', NoteKind::Slide { points }) => NoteKind::AirSlide {
-                points: points.clone(),
-                properties,
-                end_height,
+            ('S', NoteKind::Slide { .. }) => NoteKind::AirSlide {
+                points: air_points.ok_or(UgcError::MalformedRecord { line })?,
+                color: properties.color(),
                 parent,
             },
             _ => return Err(UgcError::MalformedRecord { line }),
@@ -1044,12 +1048,20 @@ impl Parser {
         kind: char,
         start_code: &str,
         following: &[&str],
-        air: bool,
-    ) -> Result<(usize, Option<Note>, Option<f64>), UgcError> {
+        air_start_height: Option<f64>,
+    ) -> Result<ParsedLongNote, UgcError> {
         let start_lane = parse_lane(line, start_code)?;
         let mut points = vec![SlidePoint::new(position, start_lane)];
         let mut consumed = 0;
-        let mut end_height = None;
+        let mut air_points = if kind == 's' && air_start_height.is_some() {
+            let height = air_start_height.ok_or(UgcError::MalformedRecord { line })?;
+            Some(vec![
+                AirPoint::new(position, start_lane, height)
+                    .map_err(|source| UgcError::Chart { line, source })?,
+            ])
+        } else {
+            None
+        };
         for follower in following {
             let follower = follower.trim();
             if follower.is_empty() || follower.starts_with('\'') {
@@ -1085,8 +1097,16 @@ impl Parser {
                     source,
                 })?;
             let lane = parse_lane(line + consumed + 1, &data[1..3])?;
-            if air && kind == 's' && data.len() > 3 {
-                end_height = Some(parse_air_height(line + consumed + 1, &data[3..])?);
+            if kind == 's' && air_points.is_some() {
+                let height = parse_air_height(line + consumed + 1, &data[3..])?;
+                if let Some(air_points) = &mut air_points {
+                    air_points.push(AirPoint::new(endpoint, lane, height).map_err(|source| {
+                        UgcError::Chart {
+                            line: line + consumed + 1,
+                            source,
+                        }
+                    })?);
+                }
             }
             points.push(SlidePoint::new(endpoint, lane));
             consumed += 1;
@@ -1113,7 +1133,11 @@ impl Parser {
             Note::new(position, start_lane, NoteKind::Slide { points })
         }
         .map_err(|source| UgcError::Chart { line, source })?;
-        Ok((consumed, Some(note), end_height))
+        Ok(ParsedLongNote {
+            consumed,
+            note: Some(note),
+            air_points,
+        })
     }
 
     fn position(&self, line: usize, measure: u32, tick: u64) -> Result<Position, UgcError> {
@@ -1645,13 +1669,10 @@ mod tests {
                 Lane::slider(4, 4).unwrap(),
                 NoteKind::AirSlide {
                     points: vec![
-                        chart::SlidePoint::new(start, Lane::slider(4, 4).unwrap()),
-                        chart::SlidePoint::new(end, Lane::slider(8, 4).unwrap()),
+                        chart::AirPoint::new(start, Lane::slider(4, 4).unwrap(), 2.0).unwrap(),
+                        chart::AirPoint::new(end, Lane::slider(8, 4).unwrap(), 2.5).unwrap(),
                     ],
-                    properties: chart::AirProperties::without_direction()
-                        .with_height(2.0)
-                        .unwrap(),
-                    end_height: Some(2.5),
+                    color: chart::AirColor::Normal,
                     parent,
                 },
             )
