@@ -3,6 +3,9 @@ use crate::{
     timing::{ScrollSpeedChange, TempoChange},
 };
 
+/// Identifies a note by its insertion index in a chart.
+///
+/// A chart implementation must preserve this identity when it reorders notes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct NoteId(u32);
 
