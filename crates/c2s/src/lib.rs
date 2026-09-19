@@ -262,8 +262,11 @@ fn parent_type(chart: &Chart, parent: NoteId) -> Result<&'static str, C2sError> 
         NoteKind::Tap(TapKind::Tap) => Ok("TAP"),
         NoteKind::Tap(TapKind::Flick { .. }) => Ok("FLK"),
         NoteKind::ExTap { .. } => Ok("CHR"),
+        NoteKind::Mine => Ok("MNE"),
         NoteKind::Hold { .. } => Ok("HLD"),
+        NoteKind::ExHold { .. } => Ok("HLD"),
         NoteKind::Slide { .. } => Ok("SLD"),
+        NoteKind::ExSlide { .. } => Ok("SLD"),
         _ => Err(unsupported("unsupported AIR parent")),
     }
 }
@@ -383,6 +386,7 @@ struct Parser {
     last_ex_parent: Option<NoteId>,
     last_tap_parent: Option<NoteId>,
     last_flick_parent: Option<NoteId>,
+    last_mine_parent: Option<NoteId>,
     last_hold_parent: Option<NoteId>,
     last_slide_parent: Option<NoteId>,
     speed_assignments: Vec<(usize, Position, Lane, u64, u32)>,
@@ -397,6 +401,7 @@ impl Parser {
             last_ex_parent: None,
             last_tap_parent: None,
             last_flick_parent: None,
+            last_mine_parent: None,
             last_hold_parent: None,
             last_slide_parent: None,
             speed_assignments: Vec::new(),
@@ -423,16 +428,10 @@ impl Parser {
                 "HXD" => self.parse_hold(line, &fields, Some(6))?,
                 "SLD" | "SLC" => self.parse_slide(line, &fields, None)?,
                 "SXD" | "SXC" => self.parse_slide(line, &fields, Some(8))?,
-                "AHD" => self.parse_air_hold(line, &fields)?,
+                "AHD" | "AHX" => self.parse_air_hold(line, &fields)?,
                 "ASD" => self.parse_air_slide(line, &fields)?,
                 "SLA" => self.parse_speed_assignment(line, &fields)?,
                 "SFL" | "SLP" => self.parse_scroll_speed(line, &fields)?,
-                "AHX" => {
-                    return Err(C2sError::UnsupportedRecord {
-                        line,
-                        record: fields[0].to_owned(),
-                    });
-                }
                 "ALD" => self.parse_air_crush(line, &fields)?,
                 _ => {}
             }
@@ -549,8 +548,9 @@ impl Parser {
             fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
         )?;
         let position = self.position(line, measure, tick)?;
-        self.add_note(line, Note::new(position, lane, NoteKind::Mine))
-            .map(|_| ())
+        let id = self.add_note(line, Note::new(position, lane, NoteKind::Mine))?;
+        self.last_mine_parent = Some(id);
+        Ok(())
     }
 
     fn parse_ex_tap(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
@@ -799,7 +799,7 @@ impl Parser {
             fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
             fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
         )?;
-        let parent = self.parent_hold(line, fields.get(5))?;
+        let parent = self.air_parent(line, fields.get(5))?;
         let duration = parse_u64(
             line,
             fields.get(6).ok_or(C2sError::MalformedRecord { line })?,
@@ -840,7 +840,7 @@ impl Parser {
             fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
             fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
         )?;
-        let parent = self.parent_slide(line, fields.get(5))?;
+        let parent = self.air_parent(line, fields.get(5))?;
         let height = fields
             .get(6)
             .ok_or(C2sError::MalformedRecord { line })?
@@ -1002,24 +1002,13 @@ impl Parser {
             })
     }
 
-    fn parent_hold(&self, line: usize, value: Option<&&str>) -> Result<NoteId, C2sError> {
+    fn air_parent(&self, line: usize, value: Option<&&str>) -> Result<NoteId, C2sError> {
         match value.ok_or(C2sError::MalformedRecord { line })? {
+            &"TAP" => self.last_tap_parent,
+            &"CHR" => self.last_ex_parent,
+            &"FLK" => self.last_flick_parent,
+            &"MNE" => self.last_mine_parent,
             &"HLD" => self.last_hold_parent,
-            target => {
-                return Err(C2sError::InvalidValue {
-                    line,
-                    value: (*target).to_owned(),
-                });
-            }
-        }
-        .ok_or(C2sError::InvalidValue {
-            line,
-            value: "AIR hold without a parent".to_owned(),
-        })
-    }
-
-    fn parent_slide(&self, line: usize, value: Option<&&str>) -> Result<NoteId, C2sError> {
-        match value.ok_or(C2sError::MalformedRecord { line })? {
             &"SLD" => self.last_slide_parent,
             target => {
                 return Err(C2sError::InvalidValue {
@@ -1030,7 +1019,7 @@ impl Parser {
         }
         .ok_or(C2sError::InvalidValue {
             line,
-            value: "AIR slide without a parent".to_owned(),
+            value: "AIR long note without a parent".to_owned(),
         })
     }
 
@@ -1246,6 +1235,21 @@ mod tests {
                 end_height: Some(2.5),
                 ..
             } if *parent == chart::NoteId::new(2) && properties.height() == Some(2.0)
+        ));
+    }
+
+    #[test]
+    fn parses_air_long_notes_with_tap_parents_and_ahx() {
+        let source = "RESOLUTION\t384\nTAP\t0\t0\t0\t4\nAHX\t0\t0\t0\t4\tTAP\t96\tDEF\nASD\t0\t96\t0\t4\tTAP\t2.0\t96\t4\t4\t2.5\tDEF\n";
+        let chart = parse(source).expect("valid AIR long notes");
+
+        assert!(matches!(
+            chart.notes()[1].kind(),
+            NoteKind::AirHold { parent, .. } if *parent == chart::NoteId::new(0)
+        ));
+        assert!(matches!(
+            chart.notes()[2].kind(),
+            NoteKind::AirSlide { parent, .. } if *parent == chart::NoteId::new(0)
         ));
     }
 
