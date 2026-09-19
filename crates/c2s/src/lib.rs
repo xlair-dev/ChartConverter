@@ -132,7 +132,7 @@ fn write_note(
             "HLD\t{measure}\t{tick}\t{lane}\t{width}\t{}",
             duration_ticks(note.position(), *end)?
         ),
-        NoteKind::Slide { points } => write_slide(measure, tick, points)?,
+        NoteKind::Slide { points } => write_slide(points)?,
         NoteKind::Air { properties, parent } => format!(
             "{}\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}",
             encode_air_direction(
@@ -196,16 +196,29 @@ fn write_note(
     Ok(())
 }
 
-fn write_slide(measure: u32, tick: u64, points: &[SlidePoint]) -> Result<String, C2sError> {
-    if points.len() != 2 {
+fn write_slide(points: &[SlidePoint]) -> Result<String, C2sError> {
+    if points.len() < 2 {
         return Err(unsupported("slide without an end point"));
     }
-    let (start_lane, start_width) = c2s_lane(points[0].lane())?;
-    let (end_lane, end_width) = c2s_lane(points[1].lane())?;
-    Ok(format!(
-        "SLD\t{measure}\t{tick}\t{start_lane}\t{start_width}\t{}\t{end_lane}\t{end_width}",
-        duration_ticks(points[0].position(), points[1].position())?
-    ))
+    points
+        .windows(2)
+        .enumerate()
+        .map(|(index, segment)| {
+            let (measure, tick) = output_position(segment[0].position())?;
+            let (start_lane, start_width) = c2s_lane(segment[0].lane())?;
+            let (end_lane, end_width) = c2s_lane(segment[1].lane())?;
+            let kind = if index + 1 == points.len() - 1 {
+                "SLD"
+            } else {
+                "SLC"
+            };
+            Ok(format!(
+                "{kind}\t{measure}\t{tick}\t{start_lane}\t{start_width}\t{}\t{end_lane}\t{end_width}",
+                duration_ticks(segment[0].position(), segment[1].position())?
+            ))
+        })
+        .collect::<Result<Vec<_>, C2sError>>()
+        .map(|records| records.join("\n"))
 }
 
 fn parent_type(chart: &Chart, parent: NoteId) -> Result<&'static str, C2sError> {
@@ -351,12 +364,12 @@ impl Parser {
                 "CHR" => self.parse_ex_tap(line, &fields)?,
                 "AIR" => self.parse_air(line, &fields)?,
                 "HLD" => self.parse_hold(line, &fields)?,
-                "SLD" => self.parse_slide(line, &fields)?,
+                "SLD" | "SLC" => self.parse_slide(line, &fields)?,
                 "AHD" => self.parse_air_hold(line, &fields)?,
                 "ASD" => self.parse_air_slide(line, &fields)?,
                 "SLA" => self.parse_speed_assignment(line, &fields)?,
                 "SFL" | "SLP" => self.parse_scroll_speed(line, &fields)?,
-                "AHX" | "SXD" | "SLC" | "SXC" | "ALD" => {
+                "AHX" | "SXD" | "SXC" | "ALD" => {
                     return Err(C2sError::UnsupportedRecord {
                         line,
                         record: fields[0].to_owned(),
@@ -644,10 +657,30 @@ impl Parser {
                 value: duration.to_string(),
             })?,
         )?;
-        let points = vec![
-            SlidePoint::new(start, start_lane),
-            SlidePoint::new(end, end_lane),
-        ];
+        let end_point = SlidePoint::new(end, end_lane);
+        if let Some(note_id) = self
+            .chart
+            .notes()
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, note)| {
+                let NoteKind::Slide { points } = note.kind() else {
+                    return false;
+                };
+                points
+                    .last()
+                    .is_some_and(|point| point.position() == start && point.lane() == start_lane)
+            })
+            .map(|(index, _)| NoteId::new(index as u32))
+        {
+            self.chart
+                .append_slide_point(note_id, end_point)
+                .map_err(|source| C2sError::Chart { line, source })?;
+            self.last_slide_parent = Some(note_id);
+            return Ok(());
+        }
+        let points = vec![SlidePoint::new(start, start_lane), end_point];
         let id = self.add_note(
             line,
             Note::new(start, start_lane, NoteKind::Slide { points }),
@@ -924,7 +957,8 @@ fn parse_u8(line: usize, value: &str) -> Result<u8, C2sError> {
 #[cfg(test)]
 mod tests {
     use chart::{
-        Chart, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, TapKind, TempoChange,
+        Chart, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, SlidePoint, TapKind,
+        TempoChange,
     };
 
     use super::{parse, write};
@@ -1076,5 +1110,29 @@ mod tests {
         let parsed = parse(&c2s).expect("round-tripped C2S output");
         assert_eq!(parsed.note_speed_group(note_id).unwrap(), Some(7));
         assert_eq!(parsed.scroll_speed_changes(), chart.scroll_speed_changes());
+    }
+
+    #[test]
+    fn writes_and_parses_multi_segment_slides() {
+        let mut chart = Chart::new();
+        let points = vec![
+            SlidePoint::new(Position::new(0, 1).unwrap(), Lane::slider(0, 4).unwrap()),
+            SlidePoint::new(Position::new(1, 1).unwrap(), Lane::slider(4, 4).unwrap()),
+            SlidePoint::new(Position::new(2, 1).unwrap(), Lane::slider(8, 4).unwrap()),
+        ];
+        chart.add_note(
+            Note::new(
+                points[0].position(),
+                points[0].lane(),
+                NoteKind::Slide { points },
+            )
+            .expect("valid slide"),
+        );
+
+        let c2s = write(&chart).expect("valid C2S output");
+        assert!(c2s.contains("SLC\t0\t0\t0\t4\t96\t4\t4"));
+        assert!(c2s.contains("SLD\t0\t96\t4\t4\t96\t8\t4"));
+        let parsed = parse(&c2s).expect("round-tripped C2S output");
+        assert_eq!(parsed.notes(), chart.notes());
     }
 }
