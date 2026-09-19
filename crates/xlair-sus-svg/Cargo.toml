@@ -1,0 +1,9 @@
+[package]
+name = "xlair-sus-svg"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chart = { path = "../chart" }
+sus = { path = "../sus" }
+thiserror.workspace = true
