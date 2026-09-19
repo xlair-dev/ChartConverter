@@ -1,8 +1,9 @@
 //! Parser and writer for the shared note and timing subset of the C2S format.
 
 use chart::{
-    AirColor, AirDirection, AirProperties, Chart, ChartError, ExDirection, Lane, Note, NoteId,
-    NoteKind, Position, ScrollScope, ScrollSpeedChange, SlidePoint, TapKind, TempoChange,
+    AirColor, AirCrushColor, AirCrushPoint, AirDirection, AirProperties, Chart, ChartError,
+    ExDirection, Lane, Note, NoteId, NoteKind, Position, ScrollScope, ScrollSpeedChange,
+    SlidePoint, TapKind, TempoChange,
 };
 use thiserror::Error;
 
@@ -139,8 +140,22 @@ fn write_note(
         ),
         NoteKind::Slide { points } => write_slide(points, None)?,
         NoteKind::ExSlide { points, direction } => write_slide(points, Some(*direction))?,
-        NoteKind::AirCrush { .. } => {
-            return Err(unsupported("AIR Crush is not supported yet"));
+        NoteKind::AirCrush {
+            points,
+            color,
+            interval,
+            ..
+        } => {
+            let end = points.last().ok_or(C2sError::UnrepresentablePosition)?;
+            let (end_lane, end_width) = c2s_lane(end.lane())?;
+            format!(
+                "ALD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{:.6}\t{}\t{end_lane}\t{end_width}\t{:.6}\t{}",
+                interval.map(output_ticks).transpose()?.unwrap_or(9600),
+                points[0].height(),
+                duration_ticks(note.position(), end.position())?,
+                end.height(),
+                encode_air_crush_color(*color)
+            )
         }
         NoteKind::Air { properties, parent } => format!(
             "{}\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}",
@@ -294,6 +309,10 @@ fn note_duration_ticks(note: &Note) -> Result<u64, C2sError> {
             let end = points.last().ok_or(C2sError::UnrepresentablePosition)?;
             duration_ticks(note.position(), end.position())
         }
+        NoteKind::AirCrush { points, .. } => {
+            let end = points.last().ok_or(C2sError::UnrepresentablePosition)?;
+            duration_ticks(note.position(), end.position())
+        }
         _ => Ok(1),
     }
 }
@@ -326,6 +345,27 @@ fn encode_air_color(color: AirColor) -> &'static str {
     match color {
         AirColor::Normal => "DEF",
         AirColor::Inverted => "PPL",
+    }
+}
+
+fn encode_air_crush_color(color: AirCrushColor) -> &'static str {
+    match color {
+        AirCrushColor::Normal => "DEF",
+        AirCrushColor::Transparent => "NON",
+        AirCrushColor::Red => "RED",
+        AirCrushColor::Orange => "ORN",
+        AirCrushColor::Yellow => "YEL",
+        AirCrushColor::Lime => "LIM",
+        AirCrushColor::Green => "GRN",
+        AirCrushColor::Aqua => "AQA",
+        AirCrushColor::Cyan => "CYN",
+        AirCrushColor::DarkBlue => "DGR",
+        AirCrushColor::Blue => "BLU",
+        AirCrushColor::Violet => "VLT",
+        AirCrushColor::Purple => "PPL",
+        AirCrushColor::Pink => "PNK",
+        AirCrushColor::Gray => "GRY",
+        AirCrushColor::Black => "BLK",
     }
 }
 
@@ -387,12 +427,13 @@ impl Parser {
                 "ASD" => self.parse_air_slide(line, &fields)?,
                 "SLA" => self.parse_speed_assignment(line, &fields)?,
                 "SFL" | "SLP" => self.parse_scroll_speed(line, &fields)?,
-                "AHX" | "ALD" => {
+                "AHX" => {
                     return Err(C2sError::UnsupportedRecord {
                         line,
                         record: fields[0].to_owned(),
                     });
                 }
+                "ALD" => self.parse_air_crush(line, &fields)?,
                 _ => {}
             }
         }
@@ -869,6 +910,98 @@ impl Parser {
         Ok(())
     }
 
+    fn parse_air_crush(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+        let (measure, tick) = self.location(line, fields)?;
+        let lane = self.lane(
+            line,
+            fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
+            fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let interval = parse_u64(
+            line,
+            fields.get(5).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let start_height = parse_air_height(
+            line,
+            fields.get(6).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let duration = parse_u64(
+            line,
+            fields.get(7).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let end_lane = self.lane(
+            line,
+            fields.get(8).ok_or(C2sError::MalformedRecord { line })?,
+            fields.get(9).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let end_height = parse_air_height(
+            line,
+            fields.get(10).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let color = parse_air_crush_color(line, fields.get(11).copied().unwrap_or("DEF"))?;
+        let start = self.position(line, measure, tick)?;
+        let end = self.position(
+            line,
+            measure,
+            tick.checked_add(duration).ok_or(C2sError::InvalidValue {
+                line,
+                value: duration.to_string(),
+            })?,
+        )?;
+        let parent = self.air_crush_parent(line, start, lane)?;
+        let interval = (interval < 9600)
+            .then(|| Position::new(interval, 96).map_err(|source| C2sError::Chart { line, source }))
+            .transpose()?;
+        self.add_note(
+            line,
+            Note::new(
+                start,
+                lane,
+                NoteKind::AirCrush {
+                    points: vec![
+                        AirCrushPoint::new(start, lane, start_height)
+                            .map_err(|source| C2sError::Chart { line, source })?,
+                        AirCrushPoint::new(end, end_lane, end_height)
+                            .map_err(|source| C2sError::Chart { line, source })?,
+                    ],
+                    color,
+                    interval,
+                    parent,
+                },
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn air_crush_parent(
+        &self,
+        line: usize,
+        start: Position,
+        _lane: Lane,
+    ) -> Result<NoteId, C2sError> {
+        // C2S ALD records do not encode their parent; retain the preceding visible note
+        // required by the IR so the AIR Crush survives conversion to formats with parents.
+        self.chart
+            .notes()
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, note)| {
+                !matches!(
+                    note.kind(),
+                    NoteKind::Air { .. }
+                        | NoteKind::AirHold { .. }
+                        | NoteKind::AirSlide { .. }
+                        | NoteKind::AirCrush { .. }
+                ) && note.position() <= start
+            })
+            .map(|(index, _)| NoteId::new(index as u32))
+            .ok_or(C2sError::InvalidValue {
+                line,
+                value: "AIR Crush without a parent note".to_owned(),
+            })
+    }
+
     fn parent_hold(&self, line: usize, value: Option<&&str>) -> Result<NoteId, C2sError> {
         match value.ok_or(C2sError::MalformedRecord { line })? {
             &"HLD" => self.last_hold_parent,
@@ -991,6 +1124,45 @@ fn parse_air_color(line: usize, value: &str) -> Result<chart::AirColor, C2sError
     }
 }
 
+fn parse_air_crush_color(line: usize, value: &str) -> Result<AirCrushColor, C2sError> {
+    match value {
+        "DEF" => Ok(AirCrushColor::Normal),
+        "NON" => Ok(AirCrushColor::Transparent),
+        "RED" => Ok(AirCrushColor::Red),
+        "ORN" => Ok(AirCrushColor::Orange),
+        "YEL" => Ok(AirCrushColor::Yellow),
+        "LIM" => Ok(AirCrushColor::Lime),
+        "GRN" => Ok(AirCrushColor::Green),
+        "AQA" => Ok(AirCrushColor::Aqua),
+        "CYN" => Ok(AirCrushColor::Cyan),
+        "DGR" => Ok(AirCrushColor::DarkBlue),
+        "BLU" => Ok(AirCrushColor::Blue),
+        "VLT" => Ok(AirCrushColor::Violet),
+        "PPL" => Ok(AirCrushColor::Purple),
+        "PNK" => Ok(AirCrushColor::Pink),
+        "GRY" => Ok(AirCrushColor::Gray),
+        "BLK" => Ok(AirCrushColor::Black),
+        _ => Err(C2sError::InvalidValue {
+            line,
+            value: value.to_owned(),
+        }),
+    }
+}
+
+fn parse_air_height(line: usize, value: &str) -> Result<f64, C2sError> {
+    let height = value.parse::<f64>().map_err(|_| C2sError::InvalidValue {
+        line,
+        value: value.to_owned(),
+    })?;
+    if !height.is_finite() || height < 0.0 {
+        return Err(C2sError::Chart {
+            line,
+            source: ChartError::InvalidAirHeight,
+        });
+    }
+    Ok(height)
+}
+
 fn parse_u64(line: usize, value: &str) -> Result<u64, C2sError> {
     value.parse().map_err(|_| C2sError::InvalidValue {
         line,
@@ -1019,8 +1191,8 @@ fn parse_u8(line: usize, value: &str) -> Result<u8, C2sError> {
 #[cfg(test)]
 mod tests {
     use chart::{
-        Chart, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, SlidePoint, TapKind,
-        TempoChange,
+        AirCrushColor, AirCrushPoint, Chart, Lane, Note, NoteKind, Position, ScrollScope,
+        ScrollSpeedChange, SlidePoint, TapKind, TempoChange,
     };
 
     use super::{parse, write};
@@ -1196,6 +1368,48 @@ mod tests {
         assert!(c2s.contains("SLD\t0\t96\t4\t4\t96\t8\t4"));
         let parsed = parse(&c2s).expect("round-tripped C2S output");
         assert_eq!(parsed.notes(), chart.notes());
+    }
+
+    #[test]
+    fn writes_and_parses_air_crush_notes() {
+        let mut chart = Chart::new();
+        let start = Position::new(1, 1).unwrap();
+        let end = Position::new(2, 1).unwrap();
+        let lane = Lane::slider(0, 4).unwrap();
+        chart.add_note(Note::new(start, lane, NoteKind::Tap(TapKind::Tap)).expect("valid parent"));
+        chart.add_note(
+            Note::new(
+                start,
+                lane,
+                NoteKind::AirCrush {
+                    points: vec![
+                        AirCrushPoint::new(start, lane, 5.0).unwrap(),
+                        AirCrushPoint::new(end, Lane::slider(4, 4).unwrap(), 6.0).unwrap(),
+                    ],
+                    color: AirCrushColor::Purple,
+                    interval: Some(Position::new(1, 4).unwrap()),
+                    parent: chart::NoteId::new(0),
+                },
+            )
+            .expect("valid AIR Crush"),
+        );
+
+        let c2s = write(&chart).expect("valid C2S output");
+        assert!(c2s.contains("ALD\t0\t96\t0\t4\t24\t5.000000\t96\t4\t4\t6.000000\tPPL"));
+        let parsed = parse(&c2s).expect("round-tripped C2S output");
+        assert_eq!(parsed.notes(), chart.notes());
+    }
+
+    #[test]
+    fn parses_air_crush_without_a_same_lane_parent() {
+        let source =
+            "RESOLUTION\t384\nTAP\t0\t0\t0\t4\nALD\t1\t0\t8\t4\t9600\t5\t96\t8\t4\t5\tDEF\n";
+        let chart = parse(source).expect("valid C2S AIR Crush");
+
+        assert!(matches!(
+            chart.notes()[1].kind(),
+            NoteKind::AirCrush { parent, .. } if *parent == chart::NoteId::new(0)
+        ));
     }
 
     #[test]
