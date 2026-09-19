@@ -76,6 +76,13 @@ impl Chart {
         &self.notes
     }
 
+    /// Returns the note identified by its stable insertion-order identity.
+    pub fn note(&self, note_id: NoteId) -> Result<&Note, ChartError> {
+        self.notes
+            .get(note_id.value() as usize)
+            .ok_or(ChartError::InvalidNoteId)
+    }
+
     pub fn set_note_speed_group(
         &mut self,
         note_id: NoteId,
