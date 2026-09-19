@@ -138,7 +138,7 @@ pub enum SideButton {
 pub enum TapKind {
     Tap,
     XTap,
-    Flick,
+    Flick { direction: Option<ExDirection> },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,7 +171,7 @@ pub enum AirColor {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AirProperties {
-    direction: AirDirection,
+    direction: Option<AirDirection>,
     height: Option<f64>,
     color: AirColor,
 }
@@ -179,7 +179,16 @@ pub struct AirProperties {
 impl AirProperties {
     pub fn new(direction: AirDirection) -> Self {
         Self {
-            direction,
+            direction: Some(direction),
+            height: None,
+            color: AirColor::Normal,
+        }
+    }
+
+    /// Creates properties for an AIR long note, whose format does not encode a direction.
+    pub fn without_direction() -> Self {
+        Self {
+            direction: None,
             height: None,
             color: AirColor::Normal,
         }
@@ -198,7 +207,8 @@ impl AirProperties {
         self
     }
 
-    pub fn direction(self) -> AirDirection {
+    /// Returns `None` when the source format does not define an AIR direction.
+    pub fn direction(self) -> Option<AirDirection> {
         self.direction
     }
 

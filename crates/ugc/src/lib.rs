@@ -1,8 +1,9 @@
-//! Parser for the timing and basic-note subset of the UGC chart format.
+//! Parser and writer for the shared subset of the UGC chart format.
 
 use chart::{
-    Chart, ChartError, Lane, MeasureTimeline, Note, NoteKind, Position, ScrollScope,
-    ScrollSpeedChange, SlidePoint, TapKind, TempoChange,
+    AirColor, AirDirection, AirProperties, Chart, ChartError, ExDirection, Lane, MeasureTimeline,
+    Note, NoteId, NoteKind, Position, ScrollScope, ScrollSpeedChange, SlidePoint, TapKind,
+    TempoChange,
 };
 use thiserror::Error;
 
@@ -80,18 +81,32 @@ fn write_note(note: &Note) -> Result<OutputRecord, UgcError> {
             let type_code = match kind {
                 TapKind::Tap => 't',
                 TapKind::XTap => 'x',
-                TapKind::Flick => 'f',
+                TapKind::Flick { .. } => 'f',
+            };
+            let suffix = match kind {
+                TapKind::Tap => "".to_owned(),
+                TapKind::XTap => "".to_owned(),
+                TapKind::Flick { direction } => direction
+                    .map(encode_ex_direction)
+                    .unwrap_or_default()
+                    .to_owned(),
             };
             format!(
-                "{prefix}{type_code}{}{}\n",
+                "{prefix}{type_code}{}{}{suffix}\n",
                 encode_base36(lane),
                 encode_base36(width)
             )
         }
         NoteKind::ExTap { .. } => {
-            return Err(UgcError::UnsupportedNote {
-                note: "ExTap".to_owned(),
-            });
+            let NoteKind::ExTap { direction } = note.kind() else {
+                unreachable!();
+            };
+            format!(
+                "{prefix}x{}{}{}\n",
+                encode_base36(lane),
+                encode_base36(width),
+                encode_ex_direction(*direction)
+            )
         }
         NoteKind::Hold { end } => {
             let offset = relative_tick(note.position(), *end)?;
@@ -179,12 +194,26 @@ fn encode_base36(value: u8) -> char {
     char::from(DIGITS[usize::from(value)])
 }
 
+fn encode_ex_direction(direction: ExDirection) -> &'static str {
+    match direction {
+        ExDirection::Up => "U",
+        ExDirection::Down => "D",
+        ExDirection::Center => "C",
+        ExDirection::All => "A",
+        ExDirection::Wide => "W",
+        ExDirection::Left => "L",
+        ExDirection::Right => "R",
+        ExDirection::Inward => "I",
+    }
+}
+
 struct Parser {
     ticks_per_beat: u64,
     timeline: MeasureTimeline,
     chart: Chart,
     in_header: bool,
     current_speed_group: Option<u32>,
+    last_parent: Option<NoteId>,
 }
 
 impl Parser {
@@ -195,6 +224,7 @@ impl Parser {
             chart: Chart::new(),
             in_header: true,
             current_speed_group: None,
+            last_parent: None,
         }
     }
 
@@ -226,6 +256,10 @@ impl Parser {
             }
             let (consumed, note) = self.parse_note(line_number, line, &lines[index + 1..])?;
             if let Some(note) = note {
+                let is_air = matches!(
+                    note.kind(),
+                    NoteKind::Air { .. } | NoteKind::AirHold { .. } | NoteKind::AirSlide { .. }
+                );
                 let note_id = self.chart.add_note(note);
                 self.chart
                     .set_note_speed_group(note_id, self.current_speed_group)
@@ -233,6 +267,9 @@ impl Parser {
                         line: line_number,
                         source,
                     })?;
+                if !is_air {
+                    self.last_parent = Some(note_id);
+                }
             }
             index += consumed + 1;
         }
@@ -386,8 +423,11 @@ impl Parser {
                 let lane = parse_lane(line, &code[1..3])?;
                 let tap_kind = match kind {
                     't' => TapKind::Tap,
-                    'x' => TapKind::XTap,
-                    'f' => TapKind::Flick,
+                    'x' if code[3..].is_empty() => TapKind::XTap,
+                    'x' => return self.parse_ex_tap(line, position, lane, &code[3..]),
+                    'f' => TapKind::Flick {
+                        direction: parse_flick_direction(line, &code[3..])?,
+                    },
                     _ => unreachable!(),
                 };
                 let note = Note::new(position, lane, NoteKind::Tap(tap_kind))
@@ -395,7 +435,11 @@ impl Parser {
                 Ok((0, Some(note)))
             }
             'h' | 's' => self.parse_long_note(line, position, kind, &code[1..3], following),
-            'a' | 'H' | 'S' | 'C' => Err(UgcError::UnsupportedRecord {
+            'a' => self.parse_air(line, position, &code[1..3], &code[3..]),
+            'H' | 'S' => {
+                self.parse_air_long(line, position, kind, &code[1..3], &code[3..], following)
+            }
+            'C' => Err(UgcError::UnsupportedRecord {
                 line,
                 record: kind.to_string(),
             }),
@@ -405,6 +449,81 @@ impl Parser {
                 record: kind.to_string(),
             }),
         }
+    }
+
+    fn parse_ex_tap(
+        &self,
+        line: usize,
+        position: Position,
+        lane: Lane,
+        direction: &str,
+    ) -> Result<(usize, Option<Note>), UgcError> {
+        let direction = parse_ex_direction(line, direction)?;
+        let note = Note::new(position, lane, NoteKind::ExTap { direction })
+            .map_err(|source| UgcError::Chart { line, source })?;
+        Ok((0, Some(note)))
+    }
+
+    fn parse_air(
+        &self,
+        line: usize,
+        position: Position,
+        lane_code: &str,
+        attributes: &str,
+    ) -> Result<(usize, Option<Note>), UgcError> {
+        let parent = self.last_parent.ok_or(UgcError::InvalidValue {
+            line,
+            value: "AIR without a parent note".to_owned(),
+        })?;
+        let lane = parse_lane(line, lane_code)?;
+        let direction = parse_air_direction(line, attributes.get(..2).unwrap_or(""))?;
+        let properties =
+            parse_air_properties(line, Some(direction), attributes.get(2..).unwrap_or(""))?;
+        let note = Note::new(position, lane, NoteKind::Air { properties, parent })
+            .map_err(|source| UgcError::Chart { line, source })?;
+        Ok((0, Some(note)))
+    }
+
+    fn parse_air_long(
+        &self,
+        line: usize,
+        position: Position,
+        kind: char,
+        lane_code: &str,
+        attributes: &str,
+        following: &[&str],
+    ) -> Result<(usize, Option<Note>), UgcError> {
+        let parent = self.last_parent.ok_or(UgcError::InvalidValue {
+            line,
+            value: "AIR long note without a parent note".to_owned(),
+        })?;
+        let properties = parse_air_properties(line, None, attributes)?;
+        let (consumed, note) = self.parse_long_note(
+            line,
+            position,
+            if kind == 'H' { 'h' } else { 's' },
+            lane_code,
+            following,
+        )?;
+        let Some(note) = note else {
+            return Ok((consumed, None));
+        };
+        let note_kind = match (kind, note.kind()) {
+            ('H', NoteKind::Hold { end }) => NoteKind::AirHold {
+                end: *end,
+                properties,
+                parent,
+            },
+            ('S', NoteKind::Slide { points }) => NoteKind::AirSlide {
+                points: points.clone(),
+                properties,
+                parent,
+            },
+            _ => return Err(UgcError::MalformedRecord { line }),
+        };
+        let note = Note::new(note.position(), note.lane(), note_kind)
+            .map_err(|source| UgcError::Chart { line, source })?;
+        Ok((consumed, Some(note)))
     }
 
     fn parse_long_note(
@@ -524,6 +643,94 @@ fn parse_lane(line: usize, value: &str) -> Result<Lane, UgcError> {
     Lane::slider(start, width).map_err(|source| UgcError::Chart { line, source })
 }
 
+fn parse_ex_direction(line: usize, value: &str) -> Result<ExDirection, UgcError> {
+    match value {
+        "U" => Ok(ExDirection::Up),
+        "D" => Ok(ExDirection::Down),
+        "C" => Ok(ExDirection::Center),
+        "A" => Ok(ExDirection::All),
+        "W" => Ok(ExDirection::Wide),
+        "L" => Ok(ExDirection::Left),
+        "R" => Ok(ExDirection::Right),
+        "I" => Ok(ExDirection::Inward),
+        _ => Err(UgcError::InvalidValue {
+            line,
+            value: value.to_owned(),
+        }),
+    }
+}
+
+fn parse_flick_direction(line: usize, value: &str) -> Result<Option<ExDirection>, UgcError> {
+    if value.is_empty() || value == "A" {
+        Ok(None)
+    } else {
+        Ok(Some(parse_ex_direction(line, value)?))
+    }
+}
+
+fn parse_air_direction(line: usize, value: &str) -> Result<AirDirection, UgcError> {
+    match value {
+        "UC" => Ok(AirDirection::Up),
+        "UL" => Ok(AirDirection::UpperLeft),
+        "UR" => Ok(AirDirection::UpperRight),
+        "DC" => Ok(AirDirection::Down),
+        "DL" => Ok(AirDirection::LowerLeft),
+        "DR" => Ok(AirDirection::LowerRight),
+        _ => Err(UgcError::InvalidValue {
+            line,
+            value: value.to_owned(),
+        }),
+    }
+}
+
+fn parse_air_properties(
+    line: usize,
+    direction: Option<AirDirection>,
+    attributes: &str,
+) -> Result<AirProperties, UgcError> {
+    if attributes.is_empty() {
+        return Ok(direction.map_or_else(AirProperties::without_direction, AirProperties::new));
+    }
+    let (height_text, color_text) = attributes.split_at(attributes.len() - 1);
+    let color = match color_text {
+        "N" => AirColor::Normal,
+        "I" => AirColor::Inverted,
+        _ => {
+            return Err(UgcError::InvalidValue {
+                line,
+                value: attributes.to_owned(),
+            });
+        }
+    };
+    let properties = direction
+        .map_or_else(AirProperties::without_direction, AirProperties::new)
+        .with_color(color);
+    if height_text.is_empty() {
+        return Ok(properties);
+    }
+    let raw = height_text.bytes().try_fold(0u32, |value, digit| {
+        let digit = match digit {
+            b'0'..=b'9' => u32::from(digit - b'0'),
+            b'a'..=b'z' => u32::from(digit - b'a' + 10),
+            b'A'..=b'Z' => u32::from(digit - b'A' + 10),
+            _ => return None,
+        };
+        value.checked_mul(36)?.checked_add(digit)
+    });
+    let raw = raw.ok_or_else(|| UgcError::InvalidValue {
+        line,
+        value: height_text.to_owned(),
+    })?;
+    let height = if height_text.len() == 1 {
+        f64::from(raw) / 2.0 + 1.0
+    } else {
+        f64::from(raw) / 10.0 + 1.0
+    };
+    properties
+        .with_height(height)
+        .map_err(|source| UgcError::Chart { line, source })
+}
+
 fn base36(line: usize, value: u8) -> Result<u8, UgcError> {
     match value {
         b'0'..=b'9' => Ok(value - b'0'),
@@ -584,12 +791,60 @@ mod tests {
         let air = "@ENDHEAD\n#0'0:a04UR";
         assert!(matches!(
             parse(air),
-            Err(super::UgcError::UnsupportedRecord { .. })
+            Err(super::UgcError::InvalidValue { .. })
         ));
         let speed = "@MAINTIL\t1\n@ENDHEAD\n";
         assert!(matches!(
             parse(speed),
             Err(super::UgcError::UnsupportedRecord { .. })
+        ));
+    }
+
+    #[test]
+    fn parses_ex_flick_and_air_notes_with_attributes() {
+        let source = "@ENDHEAD\n#0'0:x04U\n#0'0:f04L\n#0'0:a04UL2I\n";
+        let chart = parse(source).expect("valid extended UGC notes");
+
+        assert_eq!(chart.notes().len(), 3);
+        assert_eq!(
+            chart.notes()[0].kind(),
+            &NoteKind::ExTap {
+                direction: chart::ExDirection::Up
+            }
+        );
+        assert_eq!(
+            chart.notes()[1].kind(),
+            &NoteKind::Tap(TapKind::Flick {
+                direction: Some(chart::ExDirection::Left)
+            })
+        );
+        assert_eq!(
+            chart.notes()[2].kind(),
+            &NoteKind::Air {
+                properties: chart::AirProperties::new(chart::AirDirection::UpperLeft)
+                    .with_height(2.0)
+                    .unwrap()
+                    .with_color(chart::AirColor::Inverted),
+                parent: chart::NoteId::new(1),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_air_long_notes_after_their_parent() {
+        let source = "@ENDHEAD\n#0'0:h04\n#480>s04\n#0'0:H04I\n#480>s04\n";
+        let chart = parse(source).expect("valid air hold");
+
+        assert!(matches!(
+            chart.notes()[1].kind(),
+            NoteKind::AirHold {
+                end,
+                properties,
+                parent,
+            } if *end == Position::new(1, 1).unwrap()
+                && *parent == chart::NoteId::new(0)
+                && properties.direction().is_none()
+                && properties.color() == chart::AirColor::Inverted
         ));
     }
 
@@ -625,6 +880,35 @@ mod tests {
 
         let ugc = write(&chart).expect("valid output");
         assert!(ugc.contains("@ENDHEAD"));
+        assert_eq!(parse(&ugc).unwrap().notes(), chart.notes());
+    }
+
+    #[test]
+    fn writes_extended_taps_and_round_trips_them() {
+        let mut chart = Chart::new();
+        let position = Position::new(1, 1).unwrap();
+        chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::ExTap {
+                    direction: chart::ExDirection::Right,
+                },
+            )
+            .unwrap(),
+        );
+        chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(4, 4).unwrap(),
+                NoteKind::Tap(TapKind::Flick {
+                    direction: Some(chart::ExDirection::Left),
+                }),
+            )
+            .unwrap(),
+        );
+
+        let ugc = write(&chart).expect("valid extended output");
         assert_eq!(parse(&ugc).unwrap().notes(), chart.notes());
     }
 }

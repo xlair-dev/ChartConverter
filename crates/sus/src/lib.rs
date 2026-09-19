@@ -75,7 +75,7 @@ pub fn write(chart: &Chart) -> Result<String, SusError> {
                 let token = match kind {
                     TapKind::Tap => '1',
                     TapKind::XTap => '2',
-                    TapKind::Flick => '3',
+                    TapKind::Flick { .. } => '3',
                 };
                 match note.lane() {
                     Lane::Slider { start, width } => records.push(Record {
@@ -541,7 +541,7 @@ impl Parser {
             let kind = match token[0] {
                 b'1' => TapKind::Tap,
                 b'2' => TapKind::XTap,
-                b'3' => TapKind::Flick,
+                b'3' => TapKind::Flick { direction: None },
                 _ => return Err(invalid_token(line, token)),
             };
             let lane = Lane::slider(lane, base36_byte(token[1], line)?)
@@ -830,7 +830,10 @@ mod tests {
         assert_eq!(chart.notes()[0].position(), Position::new(7, 2).unwrap());
         assert_eq!(chart.notes()[1].position(), Position::new(21, 4).unwrap());
         assert_eq!(chart.notes()[0].lane(), Lane::slider(0, 2).unwrap());
-        assert_eq!(chart.notes()[1].kind(), &NoteKind::Tap(TapKind::Flick));
+        assert_eq!(
+            chart.notes()[1].kind(),
+            &NoteKind::Tap(TapKind::Flick { direction: None })
+        );
     }
 
     #[test]

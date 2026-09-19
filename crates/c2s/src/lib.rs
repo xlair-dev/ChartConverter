@@ -56,7 +56,7 @@ impl Parser {
                 "BPM" => self.parse_bpm(line, &fields)?,
                 "MET" => self.parse_met(line, &fields)?,
                 "TAP" => self.parse_tap(line, &fields, TapKind::Tap)?,
-                "FLK" => self.parse_tap(line, &fields, TapKind::Flick)?,
+                "FLK" => self.parse_tap(line, &fields, TapKind::Flick { direction: None })?,
                 "MNE" => self.parse_mine(line, &fields)?,
                 "CHR" => self.parse_ex_tap(line, &fields)?,
                 "AIR" => self.parse_air(line, &fields)?,
