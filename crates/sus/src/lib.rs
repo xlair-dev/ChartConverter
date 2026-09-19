@@ -407,8 +407,9 @@ fn parse_position(value: &str) -> Result<Position, ()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
     use chart::{Lane, NoteKind, Position, SideButton, TapKind};
+
+    use super::parse;
 
     #[test]
     fn parses_short_notes_and_variable_measure_lengths() {
