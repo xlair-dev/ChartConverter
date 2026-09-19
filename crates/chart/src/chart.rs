@@ -1,6 +1,6 @@
 use crate::{
     error::ChartError,
-    note::{Note, SlidePoint},
+    note::{AirPoint, Note, SlidePoint},
     timing::{ScrollSpeedChange, TempoChange},
 };
 
@@ -92,6 +92,17 @@ impl Chart {
             .get_mut(note_id.value() as usize)
             .ok_or(ChartError::InvalidNoteId)?
             .append_slide_point(point)
+    }
+
+    pub fn append_air_slide_point(
+        &mut self,
+        note_id: NoteId,
+        point: AirPoint,
+    ) -> Result<(), ChartError> {
+        self.notes
+            .get_mut(note_id.value() as usize)
+            .ok_or(ChartError::InvalidNoteId)?
+            .append_air_slide_point(point)
     }
 
     pub fn replace_note(&mut self, note_id: NoteId, note: Note) -> Result<(), ChartError> {
