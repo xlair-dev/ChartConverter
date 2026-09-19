@@ -17,6 +17,20 @@ pub enum Format {
 }
 
 impl Format {
+    /// Identifies a format from a file extension, with or without a leading dot.
+    pub fn from_extension(extension: &str) -> Option<Self> {
+        let extension = extension.strip_prefix('.').unwrap_or(extension);
+        if extension.eq_ignore_ascii_case("c2s") {
+            Some(Self::C2s)
+        } else if extension.eq_ignore_ascii_case("sus") {
+            Some(Self::Sus)
+        } else if extension.eq_ignore_ascii_case("ugc") {
+            Some(Self::Ugc)
+        } else {
+            None
+        }
+    }
+
     /// Returns the file extension associated with the format.
     pub fn extension(self) -> &'static str {
         match self {
@@ -121,6 +135,9 @@ mod tests {
         assert_eq!(Format::C2s.extension(), "c2s");
         assert_eq!(Format::Sus.extension(), "sus");
         assert_eq!(Format::Ugc.extension(), "ugc");
+        assert_eq!(Format::from_extension(".C2S"), Some(Format::C2s));
+        assert_eq!(Format::from_extension("sus"), Some(Format::Sus));
+        assert_eq!(Format::from_extension("chart"), None);
     }
 
     #[test]
