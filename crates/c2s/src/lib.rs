@@ -316,6 +316,7 @@ struct Parser {
     last_flick_parent: Option<NoteId>,
     last_hold_parent: Option<NoteId>,
     last_slide_parent: Option<NoteId>,
+    speed_assignments: Vec<(usize, Position, Lane, u64, u32)>,
 }
 
 impl Parser {
@@ -329,6 +330,7 @@ impl Parser {
             last_flick_parent: None,
             last_hold_parent: None,
             last_slide_parent: None,
+            speed_assignments: Vec::new(),
         }
     }
 
@@ -352,6 +354,7 @@ impl Parser {
                 "SLD" => self.parse_slide(line, &fields)?,
                 "AHD" => self.parse_air_hold(line, &fields)?,
                 "ASD" => self.parse_air_slide(line, &fields)?,
+                "SLA" => self.parse_speed_assignment(line, &fields)?,
                 "SFL" | "SLP" => self.parse_scroll_speed(line, &fields)?,
                 "AHX" | "SXD" | "SLC" | "SXC" | "ALD" => {
                     return Err(C2sError::UnsupportedRecord {
@@ -365,6 +368,27 @@ impl Parser {
 
         if self.resolution.is_none() {
             return Err(C2sError::MissingResolution);
+        }
+        for (line, position, lane, duration, group) in self.speed_assignments {
+            let note_id = self
+                .chart
+                .notes()
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, note)| {
+                    note.position() == position
+                        && note.lane() == lane
+                        && note_duration_ticks(note).ok() == Some(duration)
+                })
+                .map(|(index, _)| NoteId::new(index as u32))
+                .ok_or(C2sError::InvalidValue {
+                    line,
+                    value: "SLA without a matching note".to_owned(),
+                })?;
+            self.chart
+                .set_note_speed_group(note_id, Some(group))
+                .map_err(|source| C2sError::Chart { line, source })?;
         }
         Ok(self.chart)
     }
@@ -546,6 +570,27 @@ impl Parser {
         let change = ScrollSpeedChange::with_duration(position, speed, scope, duration)
             .map_err(|source| C2sError::Chart { line, source })?;
         self.chart.add_scroll_speed_change(change);
+        Ok(())
+    }
+
+    fn parse_speed_assignment(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+        let (measure, tick) = self.location(line, fields)?;
+        let lane = self.lane(
+            line,
+            fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
+            fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let duration = parse_u64(
+            line,
+            fields.get(5).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let group = parse_u32(
+            line,
+            fields.get(6).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let position = self.position(line, measure, tick)?;
+        self.speed_assignments
+            .push((line, position, lane, duration, group));
         Ok(())
     }
 
@@ -878,7 +923,9 @@ fn parse_u8(line: usize, value: &str) -> Result<u8, C2sError> {
 
 #[cfg(test)]
 mod tests {
-    use chart::{Chart, Lane, Note, NoteKind, Position, TapKind, TempoChange};
+    use chart::{
+        Chart, Lane, Note, NoteKind, Position, ScrollScope, ScrollSpeedChange, TapKind, TempoChange,
+    };
 
     use super::{parse, write};
 
@@ -997,5 +1044,37 @@ mod tests {
         let parsed = parse(&c2s).expect("round-tripped C2S output");
         assert_eq!(parsed.notes(), chart.notes());
         assert_eq!(parsed.tempo_changes(), chart.tempo_changes());
+    }
+
+    #[test]
+    fn writes_and_parses_note_speed_assignments() {
+        let mut chart = Chart::new();
+        let position = Position::new(1, 1).unwrap();
+        let note_id = chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::Tap(TapKind::Tap),
+            )
+            .expect("valid note"),
+        );
+        chart
+            .set_note_speed_group(note_id, Some(7))
+            .expect("valid note id");
+        chart.add_scroll_speed_change(
+            ScrollSpeedChange::with_duration(
+                position,
+                1.5,
+                ScrollScope::Group(7),
+                Position::new(1, 1).unwrap(),
+            )
+            .expect("valid speed change"),
+        );
+
+        let c2s = write(&chart).expect("valid C2S output");
+        assert!(c2s.contains("SLA\t0\t96\t0\t4\t1\t7"));
+        let parsed = parse(&c2s).expect("round-tripped C2S output");
+        assert_eq!(parsed.note_speed_group(note_id).unwrap(), Some(7));
+        assert_eq!(parsed.scroll_speed_changes(), chart.scroll_speed_changes());
     }
 }
