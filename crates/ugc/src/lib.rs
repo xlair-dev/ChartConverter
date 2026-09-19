@@ -1725,7 +1725,9 @@ mod tests {
                 NoteKind::AirSlide {
                     points: vec![
                         chart::AirPoint::new(start, Lane::slider(4, 4).unwrap(), 2.0).unwrap(),
-                        chart::AirPoint::new(middle, Lane::slider(6, 4).unwrap(), 2.25).unwrap(),
+                        chart::AirPoint::new(middle, Lane::slider(6, 4).unwrap(), 2.25)
+                            .unwrap()
+                            .with_kind(SlidePointKind::Control),
                         chart::AirPoint::new(end, Lane::slider(8, 4).unwrap(), 2.5).unwrap(),
                     ],
                     color: chart::AirColor::Normal,
@@ -1736,6 +1738,7 @@ mod tests {
         );
 
         let ugc = write(&chart).expect("valid AIR long UGC output");
+        assert!(ugc.contains(">c6"));
         let parsed = parse(&ugc).expect("round-tripped AIR long UGC output");
         assert_eq!(parsed.notes(), chart.notes());
     }
