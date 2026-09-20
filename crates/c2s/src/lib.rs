@@ -145,6 +145,9 @@ fn write_note(
     speed_groups: &BTreeSet<u32>,
     mode: ChartMode,
 ) -> Result<(), C2sError> {
+    if !note.attributes().is_empty() {
+        report_loss("C2S", "SUS note attributes");
+    }
     if mode == ChartMode::Xlair
         && matches!(
             note.kind(),
