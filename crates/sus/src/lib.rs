@@ -1784,7 +1784,10 @@ impl Parser {
             return self.parse_bpm_change(line, measure, data);
         }
         if kind.len() != 2 && kind.len() != 3 {
-            return Ok(());
+            return Err(SusError::UnsupportedCommand {
+                line,
+                command: format!("#{header}: {data}"),
+            });
         }
 
         let channel = kind.chars().nth(2);
@@ -1800,7 +1803,10 @@ impl Parser {
             '3' => self.parse_slider(line, lane, channel.unwrap(), data, positions),
             '4' => self.parse_slider(line, lane, channel.unwrap(), data, positions),
             '5' => self.parse_directional_notes(line, lane, data, positions),
-            _ => Ok(()),
+            _ => Err(SusError::UnsupportedCommand {
+                line,
+                command: format!("#{header}: {data}"),
+            }),
         }
     }
 
@@ -2526,6 +2532,14 @@ mod tests {
         let chart = parse("#00010: 22").expect("valid generic SUS");
 
         assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::XTap));
+    }
+
+    #[test]
+    fn rejects_unknown_generic_sus_data_instead_of_dropping_it() {
+        assert!(matches!(
+            parse("#00060: 14"),
+            Err(super::SusError::UnsupportedCommand { .. })
+        ));
     }
 
     #[test]
