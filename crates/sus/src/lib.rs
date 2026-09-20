@@ -1052,6 +1052,15 @@ impl Parser {
                 parse_group(line, value)?;
                 continue;
             }
+            if command.starts_with("ATR")
+                || command.starts_with("ATTRIBUTE")
+                || command.starts_with("NOATTRIBUTE")
+            {
+                return Err(SusError::UnsupportedCommand {
+                    line,
+                    command: command.to_owned(),
+                });
+            }
 
             let Some((header, data)) = command.split_once(':') else {
                 if is_metadata(command) {
@@ -2231,6 +2240,16 @@ mod tests {
         let chart = parse("#MEASUREHS 00\n#REQUEST \"enable_priority true\"\n#00110: 14")
             .expect("valid SUS display commands");
         assert_eq!(chart.notes().len(), 1);
+    }
+
+    #[test]
+    fn rejects_sus_note_attributes_instead_of_dropping_them() {
+        for source in ["#ATR01: \"h: 1.5\"", "#ATTRIBUTE 01", "#NOATTRIBUTE"] {
+            assert!(matches!(
+                parse(source),
+                Err(super::SusError::UnsupportedCommand { .. })
+            ));
+        }
     }
 
     #[test]
