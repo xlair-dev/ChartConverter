@@ -44,6 +44,9 @@ pub fn write(chart: &Chart) -> Result<String, C2sError> {
 
 /// Writes a C2S document using the selected interpretation mode.
 pub fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, C2sError> {
+    if chart.priority_enabled().is_some() {
+        report_loss("C2S", "SUS enable_priority request");
+    }
     let mut records = Vec::new();
     let mut speed_groups = BTreeSet::new();
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {

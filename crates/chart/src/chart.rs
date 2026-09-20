@@ -52,6 +52,7 @@ pub struct Chart {
     tempo_changes: Vec<TempoChange>,
     scroll_speed_changes: Vec<ScrollSpeedChange>,
     measure_lengths: Vec<(u32, Position)>,
+    priority_enabled: Option<bool>,
 }
 
 impl Chart {
@@ -72,6 +73,11 @@ impl Chart {
 
     pub fn add_scroll_speed_change(&mut self, change: ScrollSpeedChange) {
         self.scroll_speed_changes.push(change);
+    }
+
+    /// Stores the SUS priority-rendering request when the source specifies it.
+    pub fn set_priority_enabled(&mut self, enabled: bool) {
+        self.priority_enabled = Some(enabled);
     }
 
     /// Stores the length used by a SUS measure from this measure onward.
@@ -167,5 +173,10 @@ impl Chart {
     /// Returns SUS measure-length changes in ascending measure order.
     pub fn measure_lengths(&self) -> &[(u32, Position)] {
         &self.measure_lengths
+    }
+
+    /// Returns the SUS priority-rendering request, if one was specified.
+    pub fn priority_enabled(&self) -> Option<bool> {
+        self.priority_enabled
     }
 }

@@ -47,6 +47,9 @@ pub fn write(chart: &Chart) -> Result<String, UgcError> {
 
 /// Writes a UGC document using the selected interpretation mode.
 pub fn write_with_mode(chart: &Chart, _mode: ChartMode) -> Result<String, UgcError> {
+    if chart.priority_enabled().is_some() {
+        report_loss("UGC", "SUS enable_priority request");
+    }
     let mut tempo_records = Vec::new();
     for tempo in chart.tempo_changes() {
         match output_position(tempo.position()) {
