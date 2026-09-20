@@ -290,6 +290,12 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
 
     records.sort_by_key(|record| (record.measure, record.tick, record.key.clone()));
     let mut output = String::from("#REQUEST \"ticks_per_beat 384\"\n");
+    if let Some(enabled) = chart.priority_enabled() {
+        output.push_str(&format!(
+            "#REQUEST \"enable_priority {}\"\n",
+            if enabled { "true" } else { "false" }
+        ));
+    }
     for &(measure, length) in chart.measure_lengths() {
         output.push_str(&format!("#{measure:03}02: {}\n", format_position(length)?));
     }
@@ -353,6 +359,12 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
         .checked_mul(4)
         .ok_or(SusError::UnrepresentablePosition)?;
     let mut output = format!("#REQUEST \"ticks_per_beat {ticks_per_beat}\"\n");
+    if let Some(enabled) = chart.priority_enabled() {
+        output.push_str(&format!(
+            "#REQUEST \"enable_priority {}\"\n",
+            if enabled { "true" } else { "false" }
+        ));
+    }
     for &(measure, length) in chart.measure_lengths() {
         output.push_str(&format!("#{measure:03}02: {}\n", format_position(length)?));
     }
@@ -1581,7 +1593,12 @@ impl Parser {
         let value = command.trim_start_matches("REQUEST").trim();
         let fields: Vec<_> = value.trim_matches('"').split_whitespace().collect();
         if fields.len() == 2 && fields[0] == "enable_priority" {
-            if matches!(fields[1], "0" | "1" | "true" | "false") {
+            if let Some(enabled) = match fields[1] {
+                "0" | "false" => Some(false),
+                "1" | "true" => Some(true),
+                _ => None,
+            } {
+                self.chart.set_priority_enabled(enabled);
                 return Ok(());
             }
             return Err(SusError::InvalidValue {
@@ -2406,6 +2423,8 @@ mod tests {
         let chart = parse("#MEASUREHS 00\n#REQUEST \"enable_priority true\"\n#00110: 14")
             .expect("valid SUS display commands");
         assert_eq!(chart.notes().len(), 1);
+        assert_eq!(chart.priority_enabled(), Some(true));
+        assert!(write(&chart).unwrap().contains("enable_priority true"));
     }
 
     #[test]
