@@ -872,7 +872,9 @@ fn is_metadata(command: &str) -> bool {
         command.split_whitespace().next(),
         Some(
             "TITLE"
+                | "SUBTITLE"
                 | "ARTIST"
+                | "GENRE"
                 | "DESIGNER"
                 | "DIFFICULTY"
                 | "PLAYLEVEL"
@@ -880,6 +882,10 @@ fn is_metadata(command: &str) -> bool {
                 | "WAVE"
                 | "WAVEOFFSET"
                 | "JACKET"
+                | "BACKGROUND"
+                | "MOVIE"
+                | "MOVIEOFFSET"
+                | "BASEBPM"
         )
     )
 }
@@ -1007,6 +1013,31 @@ mod tests {
         assert_eq!(chart.notes()[0].lane(), Lane::Side(SideButton::LeftUpper));
         assert_eq!(chart.notes()[1].lane(), Lane::Side(SideButton::RightLower));
         assert!(matches!(chart.notes()[2].kind(), NoteKind::Hold { .. }));
+    }
+
+    #[test]
+    fn ignores_standard_metadata() {
+        let source = r#"
+#TITLE "title"
+#SUBTITLE "subtitle"
+#ARTIST "artist"
+#GENRE "genre"
+#DESIGNER "designer"
+#DIFFICULTY 3
+#PLAYLEVEL 12
+#SONGID "song"
+#WAVE "song.wav"
+#WAVEOFFSET 0
+#JACKET "jacket.jpg"
+#BACKGROUND "background.jpg"
+#MOVIE "movie.mp4"
+#MOVIEOFFSET 0
+#BASEBPM 154
+#00110: 14
+"#;
+
+        let chart = parse(source).expect("standard SUS metadata is not chart data");
+        assert_eq!(chart.notes().len(), 1);
     }
 
     #[test]
