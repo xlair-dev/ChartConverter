@@ -1702,22 +1702,7 @@ impl Parser {
             }
             let kind = match token[0] {
                 b'1' => TapKind::Tap,
-                b'2' if self.mode == ChartMode::Xlair => TapKind::XTap,
-                b'2' => {
-                    self.add_note(
-                        line,
-                        Note::new(
-                            position,
-                            Lane::slider(lane, base36_byte(token[1], line)?)
-                                .map_err(|source| SusError::Chart { line, source })?,
-                            NoteKind::ExTap {
-                                direction: ExDirection::Up,
-                            },
-                        )
-                        .map_err(|source| SusError::Chart { line, source })?,
-                    )?;
-                    continue;
-                }
+                b'2' => TapKind::XTap,
                 b'3' => TapKind::Flick { direction: None },
                 b'4' => TapKind::Tap4,
                 b'5' => TapKind::Tap5,
@@ -2286,6 +2271,13 @@ mod tests {
         assert!(matches!(chart.notes()[2].kind(), NoteKind::Hold { .. }));
         assert!(matches!(chart.notes()[3].kind(), NoteKind::Slide { .. }));
         assert_eq!(chart.notes()[4].kind(), &NoteKind::Mine);
+    }
+
+    #[test]
+    fn preserves_generic_tap_two_as_xtap() {
+        let chart = parse("#00010: 22").expect("valid generic SUS");
+
+        assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::XTap));
     }
 
     #[test]
