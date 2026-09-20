@@ -13,8 +13,8 @@ pub use chart::{Chart, NoteId};
 pub use error::ChartError;
 pub use note::{
     AirColor, AirCrushColor, AirCrushInterval, AirCrushPoint, AirDirection, AirPoint,
-    AirProperties, AirSlidePoint, ExDirection, Lane, Note, NoteKind, SideButton, SlidePoint,
-    SlidePointKind, TapKind,
+    AirProperties, AirSlidePoint, ExDirection, Lane, Note, NoteAttributes, NoteKind, SideButton,
+    SlidePoint, SlidePointKind, TapKind,
 };
 pub use position::Position;
 pub use timeline::MeasureTimeline;

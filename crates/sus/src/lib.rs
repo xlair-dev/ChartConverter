@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use chart::{
     AirDirection, AirProperties, Chart, ChartError, ChartMode, ExDirection, Lane, MeasureTimeline,
-    Note, NoteId, NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton, SlidePoint,
-    SlidePointKind, TapKind, TempoChange, report_loss,
+    Note, NoteAttributes, NoteId, NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton,
+    SlidePoint, SlidePointKind, TapKind, TempoChange, report_loss,
 };
 use thiserror::Error;
 
@@ -42,6 +42,7 @@ enum PendingStandardAir {
         direction: AirDirection,
         target: Option<String>,
         speed_group: Option<u32>,
+        attributes: NoteAttributes,
     },
     Hold {
         position: Position,
@@ -49,6 +50,7 @@ enum PendingStandardAir {
         end: Position,
         target: Option<String>,
         speed_group: Option<u32>,
+        attributes: NoteAttributes,
     },
 }
 
@@ -379,6 +381,8 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
         ));
     }
     let mut current_speed_group = None;
+    let mut current_attributes = NoteAttributes::default();
+    let mut attribute_index = 0u32;
     for note_id in standard_note_order(chart) {
         let speed_group = chart
             .note_speed_group(note_id)
@@ -404,6 +408,22 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
             current_speed_group = speed_group;
         }
         let note = &chart.notes()[note_id.value() as usize];
+        let attributes = note.attributes();
+        if attributes != current_attributes {
+            if attributes.is_empty() {
+                output.push_str("#NOATTRIBUTE\n");
+            } else {
+                let id = speed_group_text(attribute_index);
+                attribute_index = attribute_index
+                    .checked_add(1)
+                    .ok_or(SusError::UnrepresentablePosition)?;
+                output.push_str(&format!(
+                    "#ATR{id}: \"{}\"\n#ATTRIBUTE {id}\n",
+                    format_attributes(attributes)
+                ));
+            }
+            current_attributes = attributes;
+        }
         match write_standard_note(
             chart,
             note_id,
@@ -572,6 +592,20 @@ fn format_position(position: Position) -> Result<String, SusError> {
         }
     }
     Err(SusError::UnrepresentablePosition)
+}
+
+fn format_attributes(attributes: NoteAttributes) -> String {
+    let mut fields = Vec::new();
+    if let Some(roll_speed) = attributes.roll_speed() {
+        fields.push(format!("rh: {roll_speed}"));
+    }
+    if let Some(height) = attributes.height() {
+        fields.push(format!("h: {height}"));
+    }
+    if let Some(priority) = attributes.priority() {
+        fields.push(format!("pr: {priority}"));
+    }
+    fields.join(", ")
 }
 
 fn write_standard_note(
@@ -980,6 +1014,8 @@ struct Parser {
     ticks_per_beat: u64,
     measure_base: u32,
     current_speed_group: Option<u32>,
+    attribute_definitions: HashMap<String, NoteAttributes>,
+    current_attributes: Option<NoteAttributes>,
     chart: Chart,
     pending_standard_air: Vec<PendingStandardAir>,
 }
@@ -996,6 +1032,8 @@ impl Parser {
             ticks_per_beat: 480,
             measure_base: 0,
             current_speed_group: None,
+            attribute_definitions: HashMap::new(),
+            current_attributes: None,
             chart: Chart::new(),
             pending_standard_air: Vec::new(),
         }
@@ -1052,14 +1090,17 @@ impl Parser {
                 parse_group(line, value)?;
                 continue;
             }
-            if command.starts_with("ATR")
-                || command.starts_with("ATTRIBUTE")
-                || command.starts_with("NOATTRIBUTE")
-            {
-                return Err(SusError::UnsupportedCommand {
-                    line,
-                    command: command.to_owned(),
-                });
+            if command.starts_with("ATR") {
+                self.parse_attribute_definition(line, command)?;
+                continue;
+            }
+            if command.starts_with("ATTRIBUTE") {
+                self.apply_attribute(line, command)?;
+                continue;
+            }
+            if command == "NOATTRIBUTE" {
+                self.current_attributes = None;
+                continue;
             }
 
             let Some((header, data)) = command.split_once(':') else {
@@ -1105,13 +1146,14 @@ impl Parser {
 
     fn resolve_standard_air(&mut self) -> Result<(), SusError> {
         for pending in self.pending_standard_air.drain(..) {
-            let (position, lane, target, kind, speed_group) = match pending {
+            let (position, lane, target, kind, speed_group, attributes) = match pending {
                 PendingStandardAir::Tap {
                     position,
                     lane,
                     direction,
                     target,
                     speed_group,
+                    attributes,
                 } => (
                     position,
                     lane,
@@ -1121,6 +1163,7 @@ impl Parser {
                         parent: NoteId::new(0),
                     },
                     speed_group,
+                    attributes,
                 ),
                 PendingStandardAir::Hold {
                     position,
@@ -1128,6 +1171,7 @@ impl Parser {
                     end,
                     target,
                     speed_group,
+                    attributes,
                 } => (
                     position,
                     lane,
@@ -1138,6 +1182,7 @@ impl Parser {
                         parent: NoteId::new(0),
                     },
                     speed_group,
+                    attributes,
                 ),
             };
             let parent = self
@@ -1180,7 +1225,8 @@ impl Parser {
             };
             let note_id = self.chart.add_note(
                 Note::new(position, lane, kind)
-                    .map_err(|source| SusError::Chart { line: 0, source })?,
+                    .map_err(|source| SusError::Chart { line: 0, source })?
+                    .with_attributes(attributes),
             );
             self.chart
                 .set_note_speed_group(note_id, speed_group)
@@ -1323,6 +1369,7 @@ impl Parser {
                         .filter(|target| !target.is_empty())
                         .map(str::to_owned),
                     speed_group: self.current_speed_group,
+                    attributes: self.current_attributes.unwrap_or_default(),
                 });
                 Ok(())
             }
@@ -1497,6 +1544,7 @@ impl Parser {
                 .filter(|target| !target.is_empty())
                 .map(str::to_owned),
             speed_group: self.current_speed_group,
+            attributes: self.current_attributes.unwrap_or_default(),
         });
         Ok(())
     }
@@ -1532,6 +1580,36 @@ impl Parser {
             });
         }
         self.ticks_per_beat = ticks;
+        Ok(())
+    }
+
+    fn parse_attribute_definition(&mut self, line: usize, command: &str) -> Result<(), SusError> {
+        let (header, value) = command
+            .split_once(':')
+            .ok_or(SusError::MalformedCommand { line })?;
+        if header.len() != 5 || !header.starts_with("ATR") {
+            return Err(SusError::MalformedCommand { line });
+        }
+        let attributes = parse_attributes(line, value.trim())?;
+        self.attribute_definitions
+            .insert(header[3..].to_owned(), attributes);
+        Ok(())
+    }
+
+    fn apply_attribute(&mut self, line: usize, command: &str) -> Result<(), SusError> {
+        let fields: Vec<_> = command.split_whitespace().collect();
+        if fields.len() != 2 {
+            return Err(SusError::MalformedCommand { line });
+        }
+        let attributes = self
+            .attribute_definitions
+            .get(fields[1])
+            .copied()
+            .ok_or_else(|| SusError::InvalidValue {
+                line,
+                value: fields[1].to_owned(),
+            })?;
+        self.current_attributes = Some(attributes);
         Ok(())
     }
 
@@ -1979,7 +2057,9 @@ impl Parser {
     }
 
     fn add_note(&mut self, line: usize, note: Note) -> Result<(), SusError> {
-        let note_id = self.chart.add_note(note);
+        let note_id = self
+            .chart
+            .add_note(note.with_attributes(self.current_attributes.unwrap_or_default()));
         self.chart
             .set_note_speed_group(note_id, self.current_speed_group)
             .map_err(|source| SusError::Chart { line, source })
@@ -2027,6 +2107,54 @@ fn parse_group(line: usize, value: &str) -> Result<u32, SusError> {
     let high = u32::from(base36_byte(value.as_bytes()[0], line)?);
     let low = u32::from(base36_byte(value.as_bytes()[1], line)?);
     Ok(high * 36 + low)
+}
+
+fn parse_attributes(line: usize, value: &str) -> Result<NoteAttributes, SusError> {
+    let mut attributes = NoteAttributes::new();
+    let value = value.trim().trim_matches('"');
+    if value.is_empty() {
+        return Ok(attributes);
+    }
+    for field in value.split(',') {
+        let (key, raw_value) = field
+            .trim()
+            .split_once(':')
+            .ok_or(SusError::MalformedCommand { line })?;
+        let raw_value = raw_value.trim();
+        attributes = match key.trim() {
+            "rh" => attributes
+                .with_roll_speed(raw_value.parse().map_err(|_| SusError::InvalidValue {
+                    line,
+                    value: raw_value.to_owned(),
+                })?)
+                .map_err(|_| SusError::InvalidValue {
+                    line,
+                    value: raw_value.to_owned(),
+                })?,
+            "h" => attributes
+                .with_height(raw_value.parse().map_err(|_| SusError::InvalidValue {
+                    line,
+                    value: raw_value.to_owned(),
+                })?)
+                .map_err(|_| SusError::InvalidValue {
+                    line,
+                    value: raw_value.to_owned(),
+                })?,
+            "pr" => {
+                attributes.with_priority(raw_value.parse().map_err(|_| SusError::InvalidValue {
+                    line,
+                    value: raw_value.to_owned(),
+                })?)
+            }
+            _ => {
+                return Err(SusError::InvalidValue {
+                    line,
+                    value: key.trim().to_owned(),
+                });
+            }
+        };
+    }
+    Ok(attributes)
 }
 
 fn parse_measure_tick(line: usize, value: &str) -> Result<(u32, u64), SusError> {
@@ -2243,13 +2371,24 @@ mod tests {
     }
 
     #[test]
-    fn rejects_sus_note_attributes_instead_of_dropping_them() {
-        for source in ["#ATR01: \"h: 1.5\"", "#ATTRIBUTE 01", "#NOATTRIBUTE"] {
-            assert!(matches!(
-                parse(source),
-                Err(super::SusError::UnsupportedCommand { .. })
-            ));
-        }
+    fn preserves_sus_note_attributes() {
+        let source = concat!(
+            "#ATR01: \"rh: 1.5, h: 2.0, pr: 100\"\n",
+            "#ATTRIBUTE 01\n",
+            "#00010: 14\n",
+            "#NOATTRIBUTE\n",
+            "#00110: 14\n",
+        );
+        let chart = parse(source).expect("valid SUS attributes");
+
+        assert_eq!(chart.notes()[0].attributes().roll_speed(), Some(1.5));
+        assert_eq!(chart.notes()[0].attributes().height(), Some(2.0));
+        assert_eq!(chart.notes()[0].attributes().priority(), Some(100));
+        assert!(chart.notes()[1].attributes().is_empty());
+
+        let written = write(&chart).expect("attributes are representable in SUS");
+        let reparsed = parse(&written).expect("written SUS attributes");
+        assert_eq!(reparsed.notes(), chart.notes());
     }
 
     #[test]

@@ -280,6 +280,57 @@ pub enum AirDirection {
     LowerRight,
 }
 
+/// Attributes defined by SUS `ATR` records and applied to subsequent notes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NoteAttributes {
+    roll_speed: Option<f64>,
+    height: Option<f64>,
+    priority: Option<i32>,
+}
+
+impl NoteAttributes {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_roll_speed(mut self, roll_speed: f64) -> Result<Self, crate::ChartError> {
+        if !roll_speed.is_finite() {
+            return Err(crate::ChartError::InvalidNoteAttribute);
+        }
+        self.roll_speed = Some(roll_speed);
+        Ok(self)
+    }
+
+    pub fn with_height(mut self, height: f64) -> Result<Self, crate::ChartError> {
+        if !height.is_finite() || height < 0.0 {
+            return Err(crate::ChartError::InvalidNoteAttribute);
+        }
+        self.height = Some(height);
+        Ok(self)
+    }
+
+    pub fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = Some(priority);
+        self
+    }
+
+    pub fn roll_speed(self) -> Option<f64> {
+        self.roll_speed
+    }
+
+    pub fn height(self) -> Option<f64> {
+        self.height
+    }
+
+    pub fn priority(self) -> Option<i32> {
+        self.priority
+    }
+
+    pub fn is_empty(self) -> bool {
+        self == Self::default()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AirColor {
     Normal,
@@ -462,6 +513,7 @@ pub struct Note {
     position: Position,
     lane: Lane,
     kind: NoteKind,
+    attributes: NoteAttributes,
 }
 
 impl Note {
@@ -497,6 +549,7 @@ impl Note {
             position,
             lane,
             kind,
+            attributes: NoteAttributes::default(),
         })
     }
 
@@ -510,6 +563,15 @@ impl Note {
 
     pub fn kind(&self) -> &NoteKind {
         &self.kind
+    }
+
+    pub fn with_attributes(mut self, attributes: NoteAttributes) -> Self {
+        self.attributes = attributes;
+        self
+    }
+
+    pub fn attributes(&self) -> NoteAttributes {
+        self.attributes
     }
 
     /// Appends a point to a slide while preserving its temporal invariants.
