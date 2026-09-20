@@ -164,6 +164,9 @@ fn write_note(
     note: &Note,
     mode: ChartMode,
 ) -> Result<OutputRecord, UgcError> {
+    if !note.attributes().is_empty() {
+        report_loss("UGC", "SUS note attributes");
+    }
     if mode == ChartMode::Xlair
         && matches!(
             note.kind(),
