@@ -74,6 +74,9 @@ impl Chart {
         self.scroll_speed_changes.push(change);
     }
 
+    /// Stores the length used by a SUS measure from this measure onward.
+    ///
+    /// The change is format metadata; note positions remain absolute beat positions.
     pub fn set_measure_length(&mut self, measure: u32, length: Position) -> Result<(), ChartError> {
         if length.numerator() == 0 {
             return Err(ChartError::InvalidMeasureLength);
@@ -161,6 +164,7 @@ impl Chart {
         &self.scroll_speed_changes
     }
 
+    /// Returns SUS measure-length changes in ascending measure order.
     pub fn measure_lengths(&self) -> &[(u32, Position)] {
         &self.measure_lengths
     }

@@ -49,6 +49,10 @@ impl MeasureTimeline {
         )
     }
 
+    /// Converts an absolute beat position into a measure and tick offset.
+    ///
+    /// `ticks_per_beat` is applied to each measure's actual length, so variable
+    /// measure lengths do not silently use the default four-beat subdivision.
     pub fn locate(
         &self,
         position: Position,
@@ -81,6 +85,7 @@ impl MeasureTimeline {
         }
     }
 
+    /// Returns the number of ticks in a measure at the requested resolution.
     pub fn ticks(&self, measure: u32, ticks_per_beat: u64) -> Result<u64, ChartError> {
         let length = self.length_at(measure);
         let numerator = length
