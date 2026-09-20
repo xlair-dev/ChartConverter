@@ -3,9 +3,10 @@
 use std::collections::BTreeSet;
 
 use chart::{
-    AirColor, AirCrushColor, AirCrushPoint, AirDirection, AirPoint, AirProperties, Chart,
-    ChartError, ExDirection, Lane, MeasureTimeline, Note, NoteId, NoteKind, Position, ScrollScope,
-    ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange, report_loss,
+    AirColor, AirCrushColor, AirCrushInterval, AirCrushPoint, AirDirection, AirPoint,
+    AirProperties, Chart, ChartError, ExDirection, Lane, MeasureTimeline, Note, NoteId, NoteKind,
+    Position, ScrollScope, ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange,
+    report_loss,
 };
 use thiserror::Error;
 
@@ -410,10 +411,13 @@ fn write_air_note(note: &Note, prefix: &str) -> Result<String, UgcError> {
         } => {
             let (lane, width) = central_lane(note.lane())?;
             let start = &points[0];
-            let interval = interval
-                .map(|interval| relative_tick(Position::new(0, 1).unwrap(), interval))
-                .transpose()?
-                .map_or_else(|| "$".to_owned(), |interval| interval.to_string());
+            let interval = match interval {
+                AirCrushInterval::Trace => "0".to_owned(),
+                AirCrushInterval::Start => "$".to_owned(),
+                AirCrushInterval::Every(interval) => {
+                    relative_tick(Position::new(0, 1).unwrap(), *interval)?.to_string()
+                }
+            };
             let mut text = format!(
                 "{prefix}C{}{}{}{},{}\n",
                 encode_base36(lane),
@@ -985,9 +989,11 @@ impl Parser {
                 .ok_or(UgcError::MalformedRecord { line })?,
         )?;
         let interval = if interval.is_empty() || interval == "$" {
-            None
+            AirCrushInterval::Start
+        } else if interval == "0" {
+            AirCrushInterval::Trace
         } else {
-            Some(
+            AirCrushInterval::Every(
                 Position::new(parse_u64(line, interval)?, self.ticks_per_beat)
                     .map_err(|source| UgcError::Chart { line, source })?,
             )
@@ -1417,8 +1423,8 @@ fn parse_u32(line: usize, value: &str) -> Result<u32, UgcError> {
 #[cfg(test)]
 mod tests {
     use chart::{
-        AirCrushColor, AirCrushPoint, Chart, Lane, Note, NoteKind, Position, ScrollScope,
-        ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind,
+        AirCrushColor, AirCrushInterval, AirCrushPoint, Chart, Lane, Note, NoteKind, Position,
+        ScrollScope, ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind,
     };
 
     use super::{parse, write};
@@ -1682,7 +1688,7 @@ mod tests {
                         AirCrushPoint::new(end, Lane::slider(4, 4).unwrap(), 6.0).unwrap(),
                     ],
                     color: AirCrushColor::Purple,
-                    interval: Some(Position::new(1, 4).unwrap()),
+                    interval: AirCrushInterval::Every(Position::new(1, 4).unwrap()),
                     parent,
                 },
             )

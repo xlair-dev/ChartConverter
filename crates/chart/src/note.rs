@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use super::{
-        AirColor, AirCrushColor, AirCrushPoint, AirPoint, AirProperties, Lane, Note, NoteKind,
-        SideButton, SlidePoint, TapKind,
+        AirColor, AirCrushColor, AirCrushInterval, AirCrushPoint, AirPoint, AirProperties, Lane,
+        Note, NoteKind, SideButton, SlidePoint, TapKind,
     };
     use crate::{ExDirection, NoteId, Position};
 
@@ -148,7 +148,7 @@ mod tests {
             NoteKind::AirCrush {
                 points,
                 color: AirCrushColor::Normal,
-                interval: Some(Position::new(1, 4).unwrap()),
+                interval: AirCrushInterval::Every(Position::new(1, 4).unwrap()),
                 parent: NoteId::new(0),
             },
         )
@@ -165,7 +165,7 @@ mod tests {
                         AirCrushPoint::new(end, Lane::slider(4, 4).unwrap(), 6.0).unwrap(),
                     ],
                     color: AirCrushColor::Normal,
-                    interval: Some(Position::new(0, 1).unwrap()),
+                    interval: AirCrushInterval::Every(Position::new(0, 1).unwrap()),
                     parent: NoteId::new(0),
                 },
             )
@@ -282,6 +282,21 @@ pub enum AirCrushColor {
     Pink,
     Gray,
     Black,
+}
+
+/// Describes how an AIR Crush creates combo points along its path.
+///
+/// C2S and UGC use different textual values for the same three semantics: a
+/// zero interval is an AIR-TRACE, `$` is a start-only crush, and a positive
+/// interval repeats combo points at that distance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AirCrushInterval {
+    /// Do not create combo points along the path.
+    Trace,
+    /// Create a combo point only at the start of the path.
+    Start,
+    /// Repeat combo points at the given positive interval.
+    Every(Position),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -415,8 +430,7 @@ pub enum NoteKind {
     AirCrush {
         points: Vec<AirPoint>,
         color: AirCrushColor,
-        /// `None` represents UGC's `$` interval, which keeps the combo at the start.
-        interval: Option<Position>,
+        interval: AirCrushInterval,
         parent: NoteId,
     },
 }
@@ -443,7 +457,7 @@ impl Note {
             }
             NoteKind::AirCrush {
                 points,
-                interval: Some(interval),
+                interval: AirCrushInterval::Every(interval),
                 ..
             } => {
                 if *interval == Position::new(0, 1).expect("valid position") {
