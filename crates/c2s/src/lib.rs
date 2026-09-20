@@ -625,9 +625,13 @@ impl Parser {
     }
 
     fn parse_met(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
-        let measure = parse_u32(
+        let _measure = parse_u32(
             line,
             fields.get(1).ok_or(C2sError::MalformedRecord { line })?,
+        )?;
+        let _tick = parse_u64(
+            line,
+            fields.get(2).ok_or(C2sError::MalformedRecord { line })?,
         )?;
         let numerator = parse_u64(
             line,
@@ -643,13 +647,7 @@ impl Parser {
                 value: format!("{numerator}/{denominator}"),
             });
         }
-        let length_numerator = numerator.checked_mul(4).ok_or(C2sError::InvalidValue {
-            line,
-            value: format!("{numerator}/{denominator}"),
-        })?;
-        let length = Position::new(length_numerator, denominator)
-            .map_err(|source| C2sError::Chart { line, source })?;
-        self.timeline.set_length(measure, length);
+        // C2S MET changes display meter only; it does not change chart time.
         Ok(())
     }
 
@@ -1382,6 +1380,7 @@ mod tests {
         assert_eq!(chart.notes()[0].position(), Position::new(1, 1).unwrap());
         assert_eq!(chart.notes()[0].lane(), Lane::slider(4, 2).unwrap());
         assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::Tap));
+        assert_eq!(chart.notes()[2].position(), Position::new(4, 1).unwrap());
         assert!(matches!(chart.notes()[1].kind(), NoteKind::Hold { .. }));
         assert!(matches!(chart.notes()[2].kind(), NoteKind::Slide { .. }));
     }
