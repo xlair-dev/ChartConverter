@@ -123,6 +123,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                     key: "08".to_owned(),
                     token: id,
                     speed_group: None,
+                    attributes: NoteAttributes::default(),
                 });
             }
             Err(error) if is_loss(&error) => report_loss("SUS", error),
@@ -172,6 +173,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                             key: format!("1{}", base36_digit(start)),
                             token: format!("{token}{}", base36_digit(width)),
                             speed_group: None,
+                            attributes: NoteAttributes::default(),
                         }),
                         Lane::Side(button) if *kind == TapKind::Tap => records.push(Record {
                             measure,
@@ -179,6 +181,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                             key: format!("5{}", base36_digit(side_lane(button))),
                             token: format!("{}1", side_direction(button)),
                             speed_group: None,
+                            attributes: NoteAttributes::default(),
                         }),
                         Lane::Side(_) => {
                             return Err(SusError::UnsupportedNote {
@@ -195,6 +198,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                         key: format!("1{}", base36_digit(central_lane(note.lane(), "ExTap")?)),
                         token: format!("2{}", base36_digit(lane_width(note.lane())?)),
                         speed_group: None,
+                        attributes: NoteAttributes::default(),
                     });
                 }
                 NoteKind::Hold { end } => match note.lane() {
@@ -267,6 +271,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
             };
             for record in &mut records[record_start..] {
                 record.speed_group = speed_group;
+                record.attributes = note.attributes();
             }
             Ok::<(), SusError>(())
         })();
@@ -303,6 +308,8 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
         ));
     }
     let mut current_speed_group = None;
+    let mut current_attributes = NoteAttributes::default();
+    let mut attribute_index = 0u32;
     for record in records {
         let text = match format_record(&record, &timeline) {
             Ok(text) => text,
@@ -318,6 +325,21 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                 None => output.push_str("#NOSPEED\n"),
             }
             current_speed_group = record.speed_group;
+        }
+        if record.attributes != current_attributes {
+            if record.attributes.is_empty() {
+                output.push_str("#NOATTRIBUTE\n");
+            } else {
+                let id = speed_group_text(attribute_index);
+                attribute_index = attribute_index
+                    .checked_add(1)
+                    .ok_or(SusError::UnrepresentablePosition)?;
+                output.push_str(&format!(
+                    "#ATR{id}: \"{}\"\n#ATTRIBUTE {id}\n",
+                    format_attributes(record.attributes)
+                ));
+            }
+            current_attributes = record.attributes;
         }
         output.push_str(&text);
     }
@@ -834,6 +856,7 @@ struct Record {
     key: String,
     token: String,
     speed_group: Option<u32>,
+    attributes: NoteAttributes,
 }
 
 fn add_hold_records(
@@ -853,6 +876,7 @@ fn add_hold_records(
         key: format!("3{}{channel}", base36_digit(lane)),
         token: format!("1{}", base36_digit(width)),
         speed_group: None,
+        attributes: NoteAttributes::default(),
     });
     records.push(Record {
         measure: end_measure,
@@ -860,6 +884,7 @@ fn add_hold_records(
         key: format!("3{}{channel}", base36_digit(lane)),
         token: format!("2{}", base36_digit(width)),
         speed_group: None,
+        attributes: NoteAttributes::default(),
     });
     Ok(())
 }
@@ -881,6 +906,7 @@ fn add_side_hold_records(
         key: format!("2{}{channel}", base36_digit(lane)),
         token: "11".to_owned(),
         speed_group: None,
+        attributes: NoteAttributes::default(),
     });
     records.push(Record {
         measure: end_measure,
@@ -888,6 +914,7 @@ fn add_side_hold_records(
         key: format!("2{}{channel}", base36_digit(lane)),
         token: "21".to_owned(),
         speed_group: None,
+        attributes: NoteAttributes::default(),
     });
     Ok(())
 }
@@ -918,6 +945,7 @@ fn add_slide_records(
             key: format!("3{}{channel}", base36_digit(lane)),
             token: format!("{kind}{}", base36_digit(lane_width(point.lane())?)),
             speed_group: None,
+            attributes: NoteAttributes::default(),
         });
     }
     Ok(())
@@ -2267,6 +2295,16 @@ mod tests {
 
         assert!(written.contains("#00102: 3"));
         assert_eq!(reparsed.measure_lengths(), chart.measure_lengths());
+        assert_eq!(reparsed.notes(), chart.notes());
+    }
+
+    #[test]
+    fn preserves_note_attributes_when_writing_xlair_sus() {
+        let source = "#ATR01: \"rh: 1.5, h: 2.0, pr: 100\"\n#ATTRIBUTE 01\n#00010: 14";
+        let chart = parse(source).expect("valid SUS attributes");
+        let written = write_with_mode(&chart, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
+        let reparsed = parse_with_mode(&written, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
+
         assert_eq!(reparsed.notes(), chart.notes());
     }
 
