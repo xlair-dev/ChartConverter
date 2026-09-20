@@ -296,6 +296,9 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
             if enabled { "true" } else { "false" }
         ));
     }
+    if let Some(base_bpm) = chart.base_bpm() {
+        output.push_str(&format!("#BASEBPM {base_bpm}\n"));
+    }
     for &(measure, length) in chart.measure_lengths() {
         output.push_str(&format!("#{measure:03}02: {}\n", format_position(length)?));
     }
@@ -364,6 +367,9 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
             "#REQUEST \"enable_priority {}\"\n",
             if enabled { "true" } else { "false" }
         ));
+    }
+    if let Some(base_bpm) = chart.base_bpm() {
+        output.push_str(&format!("#BASEBPM {base_bpm}\n"));
     }
     for &(measure, length) in chart.measure_lengths() {
         output.push_str(&format!("#{measure:03}02: {}\n", format_position(length)?));
@@ -1094,6 +1100,20 @@ impl Parser {
             }
             if command.starts_with("BPM_DEF") {
                 self.parse_bpm_default(line, command)?;
+                continue;
+            }
+            if command.starts_with("BASEBPM") {
+                let value = command
+                    .split_whitespace()
+                    .nth(1)
+                    .ok_or(SusError::MalformedCommand { line })?;
+                let bpm = value.parse::<f64>().map_err(|_| SusError::InvalidValue {
+                    line,
+                    value: value.to_owned(),
+                })?;
+                self.chart
+                    .set_base_bpm(bpm)
+                    .map_err(|source| SusError::Chart { line, source })?;
                 continue;
             }
             if command.starts_with("HISPEED") {
@@ -2372,6 +2392,8 @@ mod tests {
 
         let chart = parse(source).expect("standard SUS metadata is not chart data");
         assert_eq!(chart.notes().len(), 1);
+        assert_eq!(chart.base_bpm(), Some(154.0));
+        assert!(write(&chart).unwrap().contains("#BASEBPM 154"));
     }
 
     #[test]
