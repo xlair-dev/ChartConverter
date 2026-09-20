@@ -53,7 +53,9 @@ pub fn write_with_mode(chart: &Chart, _mode: ChartMode) -> Result<String, UgcErr
     if chart.priority_enabled().is_some() {
         report_loss("UGC", "SUS enable_priority request");
     }
-    let base_bpm = chart.base_bpm();
+    if chart.base_bpm().is_some() {
+        report_loss("UGC", "SUS BASEBPM");
+    }
     let timeline = output_timeline(chart);
     let mut tempo_records = Vec::new();
     for tempo in chart.tempo_changes() {
@@ -134,9 +136,6 @@ pub fn write_with_mode(chart: &Chart, _mode: ChartMode) -> Result<String, UgcErr
     });
 
     let mut output = String::from("@VER\t8\n@EXVER\t1\n@TICKS\t480\n");
-    if let Some(base_bpm) = base_bpm {
-        output.push_str(&format!("@MAINBPM\t{base_bpm}\n"));
-    }
     if chart.measure_lengths().is_empty() {
         output.push_str("@BEAT\t0\t4\t4\n");
     } else {
@@ -835,12 +834,6 @@ impl Parser {
                     });
                 }
                 self.ticks_per_beat = ticks;
-            }
-            "@MAINBPM" => {
-                let bpm = parse_speed(line, value)?;
-                self.chart
-                    .set_base_bpm(bpm)
-                    .map_err(|source| UgcError::Chart { line, source })?;
             }
             "@BEAT" => self.parse_beat(line, value)?,
             "@BPM" => self.parse_bpm(line, value)?,
@@ -1638,18 +1631,6 @@ mod tests {
         let reparsed = parse(&written).expect("round-tripped variable-length UGC");
         assert_eq!(reparsed.measure_lengths(), chart.measure_lengths());
         assert_eq!(reparsed.notes(), chart.notes());
-    }
-
-    #[test]
-    fn preserves_main_bpm_when_writing_ugc() {
-        let source = "@TICKS\t480\n@MAINBPM\t132.5\n@ENDHEAD\n#0'0:t04\n";
-        let chart = parse(source).expect("valid UGC main BPM");
-        assert_eq!(chart.base_bpm(), Some(132.5));
-
-        let written = write(&chart).expect("valid UGC main BPM output");
-        assert!(written.contains("@MAINBPM\t132.5\n"));
-        let reparsed = parse(&written).expect("round-tripped UGC main BPM");
-        assert_eq!(reparsed.base_bpm(), chart.base_bpm());
     }
 
     #[test]
