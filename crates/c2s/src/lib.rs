@@ -198,6 +198,10 @@ fn write_note(
             "HLD\t{measure}\t{tick}\t{lane}\t{width}\t{}",
             duration_ticks(note.position(), *end)?
         ),
+        NoteKind::ExHold { end, .. } if mode == ChartMode::Xlair => format!(
+            "HLD\t{measure}\t{tick}\t{lane}\t{width}\t{}",
+            duration_ticks(note.position(), *end)?
+        ),
         NoteKind::ExHold { end, direction } => {
             let direction = encode_ex_direction(*direction)?;
             format!(
@@ -206,6 +210,7 @@ fn write_note(
             )
         }
         NoteKind::Slide { points } => write_slide(points, None)?,
+        NoteKind::ExSlide { points, .. } if mode == ChartMode::Xlair => write_slide(points, None)?,
         NoteKind::ExSlide { points, direction } => write_slide(points, Some(*direction))?,
         NoteKind::AirCrush {
             points,
@@ -820,7 +825,9 @@ impl Parser {
                 value: duration.to_string(),
             })?,
         )?;
-        let kind = if let Some(field) = ex_direction_field {
+        let kind = if self.mode == ChartMode::Xlair {
+            NoteKind::Hold { end }
+        } else if let Some(field) = ex_direction_field {
             NoteKind::ExHold {
                 end,
                 direction: parse_ex_direction(
@@ -874,6 +881,7 @@ impl Parser {
             SlidePointKind::Visible
         });
         let direction = ex_direction_field
+            .filter(|_| self.mode != ChartMode::Xlair)
             .map(|field| {
                 parse_ex_direction(
                     line,
@@ -1735,6 +1743,30 @@ mod tests {
         assert_eq!(xlair.notes()[0].kind(), &NoteKind::Tap(TapKind::XTap));
 
         let output = super::write_with_mode(&xlair, chart::ChartMode::Xlair).unwrap();
+        let reparsed = super::parse_with_mode(&output, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(reparsed.notes(), xlair.notes());
+    }
+
+    #[test]
+    fn applies_xlair_mode_to_c2s_extended_long_notes() {
+        let source = concat!(
+            "RESOLUTION\t384\n",
+            "HXD\t0\t0\t0\t4\t96\tBS\n",
+            "SXD\t1\t0\t4\t4\t96\t8\t4\tBS\n",
+        );
+        let normal = super::parse_with_mode(source, chart::ChartMode::Normal).unwrap();
+        assert!(matches!(normal.notes()[0].kind(), NoteKind::ExHold { .. }));
+        assert!(matches!(normal.notes()[1].kind(), NoteKind::ExSlide { .. }));
+
+        let xlair = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+        assert!(matches!(xlair.notes()[0].kind(), NoteKind::Hold { .. }));
+        assert!(matches!(xlair.notes()[1].kind(), NoteKind::Slide { .. }));
+
+        let output = super::write_with_mode(&normal, chart::ChartMode::Xlair).unwrap();
+        assert!(output.contains("HLD\t0\t0\t0\t4\t96"));
+        assert!(output.contains("SLD\t1\t0\t4\t4\t96\t8\t4"));
+        assert!(!output.contains("HXD"));
+        assert!(!output.contains("SXD"));
         let reparsed = super::parse_with_mode(&output, chart::ChartMode::Xlair).unwrap();
         assert_eq!(reparsed.notes(), xlair.notes());
     }
