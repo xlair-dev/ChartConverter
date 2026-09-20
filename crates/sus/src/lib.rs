@@ -41,12 +41,14 @@ enum PendingStandardAir {
         lane: Lane,
         direction: AirDirection,
         target: Option<String>,
+        speed_group: Option<u32>,
     },
     Hold {
         position: Position,
         lane: Lane,
         end: Position,
         target: Option<String>,
+        speed_group: Option<u32>,
     },
 }
 
@@ -1094,12 +1096,13 @@ impl Parser {
 
     fn resolve_standard_air(&mut self) -> Result<(), SusError> {
         for pending in self.pending_standard_air.drain(..) {
-            let (position, lane, target, kind) = match pending {
+            let (position, lane, target, kind, speed_group) = match pending {
                 PendingStandardAir::Tap {
                     position,
                     lane,
                     direction,
                     target,
+                    speed_group,
                 } => (
                     position,
                     lane,
@@ -1108,12 +1111,14 @@ impl Parser {
                         properties: AirProperties::new(direction),
                         parent: NoteId::new(0),
                     },
+                    speed_group,
                 ),
                 PendingStandardAir::Hold {
                     position,
                     lane,
                     end,
                     target,
+                    speed_group,
                 } => (
                     position,
                     lane,
@@ -1123,6 +1128,7 @@ impl Parser {
                         properties: AirProperties::without_direction(),
                         parent: NoteId::new(0),
                     },
+                    speed_group,
                 ),
             };
             let parent = self
@@ -1163,10 +1169,13 @@ impl Parser {
                 },
                 _ => unreachable!(),
             };
-            self.chart.add_note(
+            let note_id = self.chart.add_note(
                 Note::new(position, lane, kind)
                     .map_err(|source| SusError::Chart { line: 0, source })?,
             );
+            self.chart
+                .set_note_speed_group(note_id, speed_group)
+                .map_err(|source| SusError::Chart { line: 0, source })?;
         }
         Ok(())
     }
@@ -1304,6 +1313,7 @@ impl Parser {
                         .get(6..)
                         .filter(|target| !target.is_empty())
                         .map(str::to_owned),
+                    speed_group: self.current_speed_group,
                 });
                 Ok(())
             }
@@ -1477,6 +1487,7 @@ impl Parser {
                 .get(10..)
                 .filter(|target| !target.is_empty())
                 .map(str::to_owned),
+            speed_group: self.current_speed_group,
         });
         Ok(())
     }
@@ -2298,6 +2309,22 @@ mod tests {
             chart.notes()[2].kind(),
             NoteKind::AirHold { parent, .. } if *parent == chart::NoteId::new(0)
         ));
+    }
+
+    #[test]
+    fn preserves_speed_groups_on_standard_air_notes() {
+        let source = concat!(
+            "#TIL00: \"0'0:1.0\"\n",
+            "#HISPEED 00\n",
+            "#00000: 010008\n",
+            "#00000: 070008\n",
+        );
+        let chart = parse(source).expect("valid standard SUS AIR");
+
+        assert_eq!(
+            chart.note_speed_group(chart::NoteId::new(1)).unwrap(),
+            Some(0)
+        );
     }
 
     #[test]
