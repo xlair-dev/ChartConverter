@@ -38,7 +38,10 @@ pub fn parse_with_mode(source: &str, mode: ChartMode) -> Result<Chart, UgcError>
     Parser::new(mode).parse(source)
 }
 
-/// Writes the representable shared chart model as a fixed 4/4 UGC document.
+/// Writes the representable shared chart model as a UGC document.
+///
+/// Measure-length changes stored in the shared chart are preserved in the
+/// output and used when locating absolute note positions.
 ///
 /// Unsupported or unrepresentable chart information is omitted and reported to stdout.
 pub fn write(chart: &Chart) -> Result<String, UgcError> {
@@ -53,9 +56,10 @@ pub fn write_with_mode(chart: &Chart, _mode: ChartMode) -> Result<String, UgcErr
     if chart.base_bpm().is_some() {
         report_loss("UGC", "SUS BASEBPM");
     }
+    let timeline = output_timeline(chart);
     let mut tempo_records = Vec::new();
     for tempo in chart.tempo_changes() {
-        match output_position(tempo.position()) {
+        match output_position(tempo.position(), &timeline) {
             Ok((measure, tick)) => tempo_records.push((
                 measure,
                 tick,
@@ -75,7 +79,7 @@ pub fn write_with_mode(chart: &Chart, _mode: ChartMode) -> Result<String, UgcErr
                     note: "scroll speed duration".to_owned(),
                 });
             }
-            let (measure, tick) = output_position(change.position())?;
+            let (measure, tick) = output_position(change.position(), &timeline)?;
             let speed = format!("{:.6}", change.speed());
             let text = match change.scope() {
                 ScrollScope::Global => format!("@SPDMOD\t{measure}'{tick}\t{speed}\n"),
@@ -105,7 +109,7 @@ pub fn write_with_mode(chart: &Chart, _mode: ChartMode) -> Result<String, UgcErr
     let mut note_records = Vec::new();
     for (index, note) in chart.notes().iter().enumerate() {
         let note_id = NoteId::new(index as u32);
-        match write_note(chart, note_id, note, _mode) {
+        match write_note(chart, note_id, note, _mode, &timeline) {
             Ok(mut record) => {
                 if let Some(group) = record.speed_group
                     && !speed_groups.contains(&group)
@@ -131,7 +135,21 @@ pub fn write_with_mode(chart: &Chart, _mode: ChartMode) -> Result<String, UgcErr
         )
     });
 
-    let mut output = String::from("@VER\t8\n@EXVER\t1\n@TICKS\t480\n@BEAT\t0\t4\t4\n");
+    let mut output = String::from("@VER\t8\n@EXVER\t1\n@TICKS\t480\n");
+    if chart.measure_lengths().is_empty() {
+        output.push_str("@BEAT\t0\t4\t4\n");
+    } else {
+        for &(measure, length) in chart.measure_lengths() {
+            let denominator = length
+                .denominator()
+                .checked_mul(4)
+                .ok_or(UgcError::UnrepresentablePosition)?;
+            output.push_str(&format!(
+                "@BEAT\t{measure}\t{}\t{denominator}\n",
+                length.numerator()
+            ));
+        }
+    }
     for (_, _, text) in tempo_records {
         output.push_str(&text);
     }
@@ -169,6 +187,7 @@ fn write_note(
     note_id: NoteId,
     note: &Note,
     mode: ChartMode,
+    timeline: &MeasureTimeline,
 ) -> Result<OutputRecord, UgcError> {
     if !note.attributes().is_empty() {
         report_loss("UGC", "SUS note attributes");
@@ -186,7 +205,7 @@ fn write_note(
             note: "AIR notation in XLAIR mode".to_owned(),
         });
     }
-    let (measure, tick) = output_position(note.position())?;
+    let (measure, tick) = output_position(note.position(), timeline)?;
     let (lane, width) = central_lane(note.lane())?;
     let prefix = format!("#{measure}'{tick}:");
     let is_air = matches!(
@@ -513,19 +532,18 @@ fn central_lane(lane: Lane) -> Result<(u8, u8), UgcError> {
     }
 }
 
-fn output_position(position: Position) -> Result<(u32, u64), UgcError> {
-    let absolute_ticks = u128::from(position.numerator()) * 480;
-    let denominator = u128::from(position.denominator());
-    if absolute_ticks % denominator != 0 {
-        return Err(UgcError::UnrepresentablePosition);
+fn output_position(position: Position, timeline: &MeasureTimeline) -> Result<(u32, u64), UgcError> {
+    timeline
+        .locate(position, 480)
+        .map_err(|_| UgcError::UnrepresentablePosition)
+}
+
+fn output_timeline(chart: &Chart) -> MeasureTimeline {
+    let mut timeline = MeasureTimeline::new(Position::new(4, 1).expect("valid position"));
+    for &(measure, length) in chart.measure_lengths() {
+        timeline.set_length(measure, length);
     }
-    let absolute_ticks = absolute_ticks / denominator;
-    let measure = absolute_ticks / 1920;
-    let tick = absolute_ticks % 1920;
-    Ok((
-        u32::try_from(measure).map_err(|_| UgcError::UnrepresentablePosition)?,
-        u64::try_from(tick).map_err(|_| UgcError::UnrepresentablePosition)?,
-    ))
+    timeline
 }
 
 fn is_loss(error: &UgcError) -> bool {
@@ -906,6 +924,9 @@ impl Parser {
         )
         .map_err(|source| UgcError::Chart { line, source })?;
         self.timeline.set_length(measure, length);
+        self.chart
+            .set_measure_length(measure, length)
+            .map_err(|source| UgcError::Chart { line, source })?;
         Ok(())
     }
 
@@ -1590,6 +1611,26 @@ mod tests {
             chart.notes()[0].kind(),
             NoteKind::Hold { end } if *end == Position::new(1, 1).unwrap()
         ));
+    }
+
+    #[test]
+    fn preserves_variable_measure_lengths_when_writing_ugc() {
+        let source = concat!(
+            "@TICKS\t480\n",
+            "@BEAT\t0\t3\t4\n",
+            "@BEAT\t1\t5\t4\n",
+            "@ENDHEAD\n",
+            "#0'0:t04\n",
+            "#1'0:t04\n",
+        );
+        let chart = parse(source).expect("valid variable-length UGC");
+        let written = write(&chart).expect("valid variable-length UGC output");
+        assert!(written.contains("@BEAT\t0\t3\t4\n"));
+        assert!(written.contains("@BEAT\t1\t5\t4\n"));
+
+        let reparsed = parse(&written).expect("round-tripped variable-length UGC");
+        assert_eq!(reparsed.measure_lengths(), chart.measure_lengths());
+        assert_eq!(reparsed.notes(), chart.notes());
     }
 
     #[test]
