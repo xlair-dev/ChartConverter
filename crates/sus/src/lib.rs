@@ -528,20 +528,43 @@ fn write_standard_note(
     let prefix = format!("#{measure:02X}{tick:03X}");
     let mut lines = Vec::new();
     match note.kind() {
-        NoteKind::Tap(kind) => {
-            let code = match kind {
-                TapKind::Tap => "01",
-                TapKind::XTap => "02",
-                TapKind::Flick { .. } => "03",
-                TapKind::Tap4 | TapKind::Tap5 | TapKind::Tap6 => {
-                    return Err(SusError::UnsupportedNote {
-                        note: "SUS tap variant".to_owned(),
-                    });
-                }
-            };
-            lines.push(format!("{prefix}: {code}{lane_width}"));
-        }
-        NoteKind::ExTap { .. } => lines.push(format!("{prefix}: 02{lane_width}")),
+        NoteKind::Tap(kind) => match kind {
+            TapKind::Tap => lines.push(format!("{prefix}: 01{lane_width}")),
+            TapKind::XTap => lines.push(format!("{prefix}: 02{lane_width}")),
+            TapKind::Flick { .. } => lines.push(format!("{prefix}: 03{lane_width}")),
+            TapKind::Tap4 => lines.push(standard_channel_line(
+                note.position(),
+                '1',
+                start,
+                '4',
+                width,
+                ticks_per_measure,
+            )?),
+            TapKind::Tap5 => lines.push(standard_channel_line(
+                note.position(),
+                '1',
+                start,
+                '5',
+                width,
+                ticks_per_measure,
+            )?),
+            TapKind::Tap6 => lines.push(standard_channel_line(
+                note.position(),
+                '1',
+                start,
+                '6',
+                width,
+                ticks_per_measure,
+            )?),
+        },
+        NoteKind::ExTap { direction } => lines.push(standard_channel_line(
+            note.position(),
+            '5',
+            start,
+            standard_ex_direction(*direction)?,
+            width,
+            ticks_per_measure,
+        )?),
         NoteKind::Mine => lines.push(format!("{prefix}: 10{lane_width}")),
         NoteKind::Hold { end } | NoteKind::ExHold { end, .. } => {
             let duration = duration_ticks(note.position(), *end, ticks_per_measure)?;
@@ -661,6 +684,45 @@ fn duration_ticks(start: Position, end: Position, ticks_per_measure: u64) -> Res
     u16::try_from(ticks)
         .map(u64::from)
         .map_err(|_| SusError::UnrepresentablePosition)
+}
+
+fn standard_channel_line(
+    position: Position,
+    kind: char,
+    lane: u8,
+    token_kind: char,
+    width: u8,
+    ticks_per_measure: u64,
+) -> Result<String, SusError> {
+    let (measure, tick) = standard_position(position, ticks_per_measure)?;
+    let tick = usize::try_from(tick).map_err(|_| SusError::UnrepresentablePosition)?;
+    let slots =
+        usize::try_from(ticks_per_measure).map_err(|_| SusError::UnrepresentablePosition)?;
+    let trailing = slots
+        .checked_sub(tick + 1)
+        .ok_or(SusError::UnrepresentablePosition)?;
+    Ok(format!(
+        "#{measure:03}{kind}{}: {}{}{}{}",
+        base36_digit(lane),
+        "00".repeat(tick),
+        token_kind,
+        base36_digit(width),
+        "00".repeat(trailing),
+    ))
+}
+
+fn standard_ex_direction(direction: ExDirection) -> Result<char, SusError> {
+    match direction {
+        ExDirection::Up => Ok('1'),
+        ExDirection::Down => Ok('2'),
+        ExDirection::UpperLeft => Ok('3'),
+        ExDirection::UpperRight => Ok('4'),
+        ExDirection::LowerLeft => Ok('5'),
+        ExDirection::LowerRight => Ok('6'),
+        _ => Err(SusError::UnsupportedNote {
+            note: "standard SUS ExTap direction".to_owned(),
+        }),
+    }
 }
 
 struct Record {
@@ -2145,6 +2207,37 @@ mod tests {
         let parsed = parse(&source).expect("valid standard SUS round trip");
         assert_eq!(parsed.scroll_speed_changes(), chart.scroll_speed_changes());
         assert_eq!(parsed.note_speed_group(NoteId::new(0)).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn preserves_generic_sus_tap_variants_and_directions() {
+        let mut chart = Chart::new();
+        for (index, kind) in [TapKind::Tap4, TapKind::Tap5, TapKind::Tap6]
+            .into_iter()
+            .enumerate()
+        {
+            chart.add_note(
+                Note::new(
+                    Position::new(index as u64, 1).unwrap(),
+                    Lane::slider(index as u8, 2).unwrap(),
+                    NoteKind::Tap(kind),
+                )
+                .unwrap(),
+            );
+        }
+        chart.add_note(
+            Note::new(
+                Position::new(3, 1).unwrap(),
+                Lane::slider(6, 2).unwrap(),
+                NoteKind::ExTap {
+                    direction: chart::ExDirection::LowerRight,
+                },
+            )
+            .unwrap(),
+        );
+        let source = write(&chart).expect("valid generic SUS output");
+        let parsed = parse(&source).expect("valid generic SUS round trip");
+        assert_eq!(parsed.notes(), chart.notes());
     }
 
     #[test]
