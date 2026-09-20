@@ -81,7 +81,7 @@ impl Chart {
         self.priority_enabled = Some(enabled);
     }
 
-    /// Stores the SUS base BPM used to interpret scroll-speed values.
+    /// Stores the chart's base BPM used to interpret scroll-speed values.
     pub fn set_base_bpm(&mut self, bpm: f64) -> Result<(), ChartError> {
         if !bpm.is_finite() || bpm <= 0.0 {
             return Err(ChartError::InvalidTempo);
