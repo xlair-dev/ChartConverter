@@ -90,7 +90,7 @@ impl Chart {
         Ok(())
     }
 
-    /// Stores the length used by a SUS measure from this measure onward.
+    /// Stores the length used by a format measure from this measure onward.
     ///
     /// The change is format metadata; note positions remain absolute beat positions.
     pub fn set_measure_length(&mut self, measure: u32, length: Position) -> Result<(), ChartError> {
@@ -180,7 +180,7 @@ impl Chart {
         &self.scroll_speed_changes
     }
 
-    /// Returns SUS measure-length changes in ascending measure order.
+    /// Returns measure-length changes in ascending measure order.
     pub fn measure_lengths(&self) -> &[(u32, Position)] {
         &self.measure_lengths
     }
