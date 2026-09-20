@@ -842,6 +842,12 @@ impl Parser {
                     .set_base_bpm(bpm)
                     .map_err(|source| UgcError::Chart { line, source })?;
             }
+            "@SPDDEF" | "@SPDFLD" => {
+                return Err(UgcError::UnsupportedRecord {
+                    line,
+                    record: tag.to_owned(),
+                });
+            }
             "@BEAT" => self.parse_beat(line, value)?,
             "@BPM" => self.parse_bpm(line, value)?,
             "@TIL" => self.parse_group_speed(line, value)?,
@@ -866,6 +872,12 @@ impl Parser {
             "@TIL" => self.parse_group_speed(line, value)?,
             "@SPDMOD" => self.parse_global_speed(line, value)?,
             "@USETIL" => self.parse_speed_group(line, value)?,
+            "@SPDDEF" | "@SPDFLD" => {
+                return Err(UgcError::UnsupportedRecord {
+                    line,
+                    record: tag.to_owned(),
+                });
+            }
             _ => {}
         }
         Ok(())
@@ -1700,6 +1712,12 @@ mod tests {
         let speed = "@MAINTIL\t1\n@ENDHEAD\n";
         assert!(matches!(
             parse(speed),
+            Err(super::UgcError::UnsupportedRecord { .. })
+        ));
+
+        let speed_field = "@SPDDEF\t1\t0\t1.0\n@ENDHEAD\n";
+        assert!(matches!(
+            parse(speed_field),
             Err(super::UgcError::UnsupportedRecord { .. })
         ));
     }
