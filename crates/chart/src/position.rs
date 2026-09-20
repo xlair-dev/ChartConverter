@@ -63,6 +63,25 @@ impl Position {
             .ok_or(ChartError::PositionOverflow)?;
         Self::new(numerator, denominator)
     }
+
+    pub(crate) fn checked_sub(self, other: Self) -> Result<Self, ChartError> {
+        let left = self
+            .numerator
+            .checked_mul(other.denominator)
+            .ok_or(ChartError::PositionOverflow)?;
+        let right = other
+            .numerator
+            .checked_mul(self.denominator)
+            .ok_or(ChartError::PositionOverflow)?;
+        let numerator = left
+            .checked_sub(right)
+            .ok_or(ChartError::PositionOverflow)?;
+        let denominator = self
+            .denominator
+            .checked_mul(other.denominator)
+            .ok_or(ChartError::PositionOverflow)?;
+        Self::new(numerator, denominator)
+    }
 }
 
 impl Ord for Position {

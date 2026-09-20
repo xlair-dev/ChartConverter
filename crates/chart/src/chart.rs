@@ -1,4 +1,5 @@
 use crate::{
+    Position,
     error::ChartError,
     note::{AirPoint, Note, SlidePoint},
     timing::{ScrollSpeedChange, TempoChange},
@@ -50,6 +51,7 @@ pub struct Chart {
     note_speed_groups: Vec<Option<u32>>,
     tempo_changes: Vec<TempoChange>,
     scroll_speed_changes: Vec<ScrollSpeedChange>,
+    measure_lengths: Vec<(u32, Position)>,
 }
 
 impl Chart {
@@ -70,6 +72,24 @@ impl Chart {
 
     pub fn add_scroll_speed_change(&mut self, change: ScrollSpeedChange) {
         self.scroll_speed_changes.push(change);
+    }
+
+    pub fn set_measure_length(&mut self, measure: u32, length: Position) -> Result<(), ChartError> {
+        if length.numerator() == 0 {
+            return Err(ChartError::InvalidMeasureLength);
+        }
+        if let Some((_, current)) = self
+            .measure_lengths
+            .iter_mut()
+            .find(|(current_measure, _)| *current_measure == measure)
+        {
+            *current = length;
+        } else {
+            self.measure_lengths.push((measure, length));
+            self.measure_lengths
+                .sort_by_key(|(current_measure, _)| *current_measure);
+        }
+        Ok(())
     }
 
     pub fn notes(&self) -> &[Note] {
@@ -139,5 +159,9 @@ impl Chart {
 
     pub fn scroll_speed_changes(&self) -> &[ScrollSpeedChange] {
         &self.scroll_speed_changes
+    }
+
+    pub fn measure_lengths(&self) -> &[(u32, Position)] {
+        &self.measure_lengths
     }
 }
