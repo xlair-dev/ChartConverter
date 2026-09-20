@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use chart::{Chart, Lane, Note, NoteKind, Position, SideButton, TapKind};
+use chart::{Chart, ChartMode, Lane, Note, NoteKind, Position, SideButton, TapKind};
 use thiserror::Error;
 
 const WIDTH: f64 = 640.0;
@@ -19,7 +19,7 @@ pub enum SvgError {
 
 /// Parses an XLAIR-compatible SUS document and renders it as SVG.
 pub fn render(source: &str) -> Result<String, SvgError> {
-    let chart = sus::parse(source)?;
+    let chart = sus::parse_with_mode(source, ChartMode::Xlair)?;
     Ok(render_chart(&chart))
 }
 
@@ -99,6 +99,7 @@ fn render_note(svg: &mut String, note: &Note) {
                 TapKind::Tap => "tap",
                 TapKind::XTap => "xtap",
                 TapKind::Flick { .. } => "flick",
+                TapKind::Tap4 | TapKind::Tap5 | TapKind::Tap6 => "tap",
             };
             circle(svg, class, note.lane(), start_y, 7.0);
         }
