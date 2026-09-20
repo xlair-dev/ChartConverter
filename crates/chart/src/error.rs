@@ -8,6 +8,8 @@ pub enum ChartError {
     PositionOverflow,
     #[error("measure offset must be between zero and one")]
     InvalidMeasureOffset,
+    #[error("measure length must be greater than zero")]
+    InvalidMeasureLength,
     #[error("slider lane must fit within the sixteen central lanes")]
     InvalidSliderLane,
     #[error("slider lane width must be greater than zero")]

@@ -49,6 +49,50 @@ impl MeasureTimeline {
         )
     }
 
+    pub fn locate(
+        &self,
+        position: Position,
+        ticks_per_beat: u64,
+    ) -> Result<(u32, u64), ChartError> {
+        let mut measure = 0u32;
+        let mut start = Position::new(0, 1)?;
+        loop {
+            let length = self.length_at(measure);
+            let end = start.checked_add(length)?;
+            if position < end {
+                let offset = position.checked_sub(start)?;
+                let subdivisions = self.ticks(measure, ticks_per_beat)?;
+                let numerator = offset
+                    .numerator()
+                    .checked_mul(length.denominator())
+                    .and_then(|value| value.checked_mul(subdivisions))
+                    .ok_or(ChartError::PositionOverflow)?;
+                let denominator = offset
+                    .denominator()
+                    .checked_mul(length.numerator())
+                    .ok_or(ChartError::PositionOverflow)?;
+                if numerator % denominator != 0 {
+                    return Err(ChartError::PositionOverflow);
+                }
+                return Ok((measure, numerator / denominator));
+            }
+            start = end;
+            measure = measure.checked_add(1).ok_or(ChartError::PositionOverflow)?;
+        }
+    }
+
+    pub fn ticks(&self, measure: u32, ticks_per_beat: u64) -> Result<u64, ChartError> {
+        let length = self.length_at(measure);
+        let numerator = length
+            .numerator()
+            .checked_mul(ticks_per_beat)
+            .ok_or(ChartError::PositionOverflow)?;
+        if numerator % length.denominator() != 0 {
+            return Err(ChartError::PositionOverflow);
+        }
+        Ok(numerator / length.denominator())
+    }
+
     fn length_at(&self, measure: u32) -> Position {
         self.length_changes
             .iter()

@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chart::{
-    AirDirection, AirProperties, Chart, ChartError, ChartMode, ExDirection, Lane, Note, NoteId,
-    NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton, SlidePoint, SlidePointKind,
-    TapKind, TempoChange, report_loss,
+    AirDirection, AirProperties, Chart, ChartError, ChartMode, ExDirection, Lane, MeasureTimeline,
+    Note, NoteId, NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton, SlidePoint,
+    SlidePointKind, TapKind, TempoChange, report_loss,
 };
 use thiserror::Error;
 
@@ -305,11 +305,15 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
 }
 
 fn write_standard(chart: &Chart) -> Result<String, SusError> {
+    let timeline = output_timeline(chart);
     let ticks_per_beat = standard_ticks_per_beat(chart)?;
     let ticks_per_measure = ticks_per_beat
         .checked_mul(4)
         .ok_or(SusError::UnrepresentablePosition)?;
     let mut output = format!("#REQUEST \"ticks_per_beat {ticks_per_beat}\"\n");
+    for &(measure, length) in chart.measure_lengths() {
+        output.push_str(&format!("#{measure:03}02: {}\n", format_position(length)?));
+    }
     let mut speed_definitions = BTreeMap::<u32, Vec<(u32, u64, f64)>>::new();
     for change in chart.scroll_speed_changes() {
         let definition = (|| {
@@ -323,7 +327,7 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
                     note: "non-group scroll speed change".to_owned(),
                 });
             };
-            let (measure, tick) = standard_position(change.position(), ticks_per_measure)?;
+            let (measure, tick) = standard_position(change.position(), ticks_per_beat, &timeline)?;
             let group = speed_group(group)?;
             Ok((group, measure, tick, change.speed()))
         })();
@@ -342,7 +346,7 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {
         let id = format!("{:02}", index + 1);
         output.push_str(&format!("#BPM{id}: {}\n", tempo.bpm()));
-        let (measure, tick) = standard_position(tempo.position(), ticks_per_measure)?;
+        let (measure, tick) = standard_position(tempo.position(), ticks_per_beat, &timeline)?;
         output.push_str(&format!("#{measure:02X}{tick:03X}: 08{id}\n"));
     }
     for (group, definitions) in speed_definitions {
@@ -382,7 +386,14 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
             current_speed_group = speed_group;
         }
         let note = &chart.notes()[note_id.value() as usize];
-        match write_standard_note(chart, note_id, note, ticks_per_measure) {
+        match write_standard_note(
+            chart,
+            note_id,
+            note,
+            ticks_per_measure,
+            ticks_per_beat,
+            &timeline,
+        ) {
             Ok(lines) => {
                 for line in lines {
                     output.push_str(&line);
@@ -512,13 +523,48 @@ fn gcd(mut left: u64, mut right: u64) -> u64 {
     left.max(1)
 }
 
+fn output_timeline(chart: &Chart) -> MeasureTimeline {
+    let mut timeline = MeasureTimeline::new(Position::new(4, 1).expect("valid position"));
+    for &(measure, length) in chart.measure_lengths() {
+        timeline.set_length(measure, length);
+    }
+    timeline
+}
+
+fn format_position(position: Position) -> Result<String, SusError> {
+    let integer = position.numerator() / position.denominator();
+    let mut remainder = position.numerator() % position.denominator();
+    if remainder == 0 {
+        return Ok(integer.to_string());
+    }
+    let mut fraction = String::new();
+    for _ in 0..18 {
+        remainder = remainder
+            .checked_mul(10)
+            .ok_or(SusError::UnrepresentablePosition)?;
+        fraction.push(char::from(
+            b'0' + (remainder / position.denominator()) as u8,
+        ));
+        remainder %= position.denominator();
+        if remainder == 0 {
+            while fraction.ends_with('0') {
+                fraction.pop();
+            }
+            return Ok(format!("{integer}.{fraction}"));
+        }
+    }
+    Err(SusError::UnrepresentablePosition)
+}
+
 fn write_standard_note(
     chart: &Chart,
     note_id: NoteId,
     note: &Note,
     ticks_per_measure: u64,
+    ticks_per_beat: u64,
+    timeline: &MeasureTimeline,
 ) -> Result<Vec<String>, SusError> {
-    let (measure, tick) = standard_position(note.position(), ticks_per_measure)?;
+    let (measure, tick) = standard_position(note.position(), ticks_per_beat, timeline)?;
     let Lane::Slider { start, width } = note.lane() else {
         return Err(SusError::UnsupportedNote {
             note: "side lane in standard SUS".to_owned(),
@@ -538,7 +584,8 @@ fn write_standard_note(
                 start,
                 '4',
                 width,
-                ticks_per_measure,
+                ticks_per_beat,
+                timeline,
             )?),
             TapKind::Tap5 => lines.push(standard_channel_line(
                 note.position(),
@@ -546,7 +593,8 @@ fn write_standard_note(
                 start,
                 '5',
                 width,
-                ticks_per_measure,
+                ticks_per_beat,
+                timeline,
             )?),
             TapKind::Tap6 => lines.push(standard_channel_line(
                 note.position(),
@@ -554,7 +602,8 @@ fn write_standard_note(
                 start,
                 '6',
                 width,
-                ticks_per_measure,
+                ticks_per_beat,
+                timeline,
             )?),
         },
         NoteKind::ExTap { direction } => {
@@ -565,7 +614,8 @@ fn write_standard_note(
                     start,
                     direction,
                     width,
-                    ticks_per_measure,
+                    ticks_per_beat,
+                    timeline,
                 )?);
             } else {
                 lines.push(format!("{prefix}: 02{lane_width}"));
@@ -599,7 +649,7 @@ fn write_standard_note(
                     });
                 };
                 let (segment_measure, segment_tick) =
-                    standard_position(start.position(), ticks_per_measure)?;
+                    standard_position(start.position(), ticks_per_beat, timeline)?;
                 let duration = duration_ticks(start.position(), end.position(), ticks_per_measure)?;
                 lines.push(format!(
                     "#{segment_measure:02X}{segment_tick:03X}: 06{:02X}{:02X}{duration:04X}{:02X}{:02X}",
@@ -645,24 +695,14 @@ fn write_standard_note(
     Ok(lines)
 }
 
-fn standard_position(position: Position, ticks_per_measure: u64) -> Result<(u32, u64), SusError> {
-    let measure = position.numerator() / position.denominator() / 4;
-    let remainder = position.numerator() % (position.denominator() * 4);
-    let tick_numerator = remainder
-        .checked_mul(ticks_per_measure)
-        .ok_or(SusError::UnrepresentablePosition)?;
-    let tick_denominator = position
-        .denominator()
-        .checked_mul(4)
-        .ok_or(SusError::UnrepresentablePosition)?;
-    if tick_numerator % tick_denominator != 0 {
-        return Err(SusError::UnrepresentablePosition);
-    }
-    let tick = tick_numerator / tick_denominator;
-    Ok((
-        u32::try_from(measure).map_err(|_| SusError::UnrepresentablePosition)?,
-        tick,
-    ))
+fn standard_position(
+    position: Position,
+    ticks_per_beat: u64,
+    timeline: &MeasureTimeline,
+) -> Result<(u32, u64), SusError> {
+    timeline
+        .locate(position, ticks_per_beat)
+        .map_err(|_| SusError::UnrepresentablePosition)
 }
 
 fn duration_ticks(start: Position, end: Position, ticks_per_measure: u64) -> Result<u64, SusError> {
@@ -698,12 +738,17 @@ fn standard_channel_line(
     lane: u8,
     token_kind: char,
     width: u8,
-    ticks_per_measure: u64,
+    ticks_per_beat: u64,
+    timeline: &MeasureTimeline,
 ) -> Result<String, SusError> {
-    let (measure, tick) = standard_position(position, ticks_per_measure)?;
+    let (measure, tick) = standard_position(position, ticks_per_beat, timeline)?;
     let tick = usize::try_from(tick).map_err(|_| SusError::UnrepresentablePosition)?;
-    let slots =
-        usize::try_from(ticks_per_measure).map_err(|_| SusError::UnrepresentablePosition)?;
+    let slots = usize::try_from(
+        timeline
+            .ticks(measure, ticks_per_beat)
+            .map_err(|_| SusError::UnrepresentablePosition)?,
+    )
+    .map_err(|_| SusError::UnrepresentablePosition)?;
     let trailing = slots
         .checked_sub(tick + 1)
         .ok_or(SusError::UnrepresentablePosition)?;
@@ -1551,6 +1596,9 @@ impl Parser {
                 value: data.to_owned(),
             })?;
             self.timeline.set_length(measure, length);
+            self.chart
+                .set_measure_length(measure, length)
+                .map_err(|source| SusError::Chart { line, source })?;
             return Ok(());
         }
         if kind == "08" {
@@ -2048,6 +2096,18 @@ mod tests {
             chart.notes()[1].kind(),
             &NoteKind::Tap(TapKind::Flick { direction: None })
         );
+    }
+
+    #[test]
+    fn preserves_variable_measure_lengths_when_writing_standard_sus() {
+        let source = "#00102: 3\n#00210: 14";
+        let chart = parse(source).expect("valid SUS");
+        let written = write(&chart).expect("variable measure length is representable");
+        let reparsed = parse(&written).expect("written SUS is valid");
+
+        assert!(written.contains("#00102: 3"));
+        assert_eq!(reparsed.measure_lengths(), chart.measure_lengths());
+        assert_eq!(reparsed.notes(), chart.notes());
     }
 
     #[test]
