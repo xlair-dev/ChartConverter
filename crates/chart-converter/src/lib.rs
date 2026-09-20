@@ -159,12 +159,12 @@ fn decode_utf16(
     source: &[u8],
     decode_unit: impl Fn([u8; 2]) -> u16,
 ) -> Result<String, SourceEncodingError> {
-    let units = source
-        .chunks_exact(2)
-        .map(|chunk| decode_unit([chunk[0], chunk[1]]));
-    if !source.chunks_exact(2).remainder().is_empty() {
+    if !source.len().is_multiple_of(2) {
         return Err(SourceEncodingError::Utf16);
     }
+    let units = source
+        .chunks(2)
+        .map(|chunk| decode_unit([chunk[0], chunk[1]]));
     char::decode_utf16(units)
         .collect::<Result<String, _>>()
         .map_err(|_| SourceEncodingError::Utf16)
