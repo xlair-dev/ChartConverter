@@ -1420,8 +1420,12 @@ impl Parser {
             .position(measure, tick, ticks_per_measure)
             .map_err(|source| UgcError::Chart { line, source })?;
         if self.offset_measure {
+            let offset = self
+                .timeline
+                .position(1, 0, ticks_per_measure)
+                .map_err(|source| UgcError::Chart { line, source })?;
             position
-                .checked_add(Position::new(4, 1).expect("valid measure offset"))
+                .checked_add(offset)
                 .map_err(|source| UgcError::Chart { line, source })
         } else {
             Ok(position)
@@ -1699,9 +1703,9 @@ mod tests {
 
     #[test]
     fn applies_ugc_soffset_to_chart_positions() {
-        let source = "@TICKS\t480\n@FLAG\tSOFFSET\tTRUE\n@ENDHEAD\n#0'0:t04\n";
+        let source = "@TICKS\t480\n@FLAG\tSOFFSET\tTRUE\n@BEAT\t0\t3\t4\n@ENDHEAD\n#0'0:t04\n";
         let chart = parse(source).expect("valid UGC SOFFSET");
-        assert_eq!(chart.notes()[0].position(), Position::new(4, 1).unwrap());
+        assert_eq!(chart.notes()[0].position(), Position::new(3, 1).unwrap());
 
         let written = write(&chart).expect("valid normalized UGC output");
         assert!(written.contains("#1'0:t04\n"));
