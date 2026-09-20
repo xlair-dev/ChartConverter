@@ -915,6 +915,7 @@ struct Parser {
     pending_holds: HashMap<char, PendingSlide>,
     pending_sliders: HashMap<char, PendingSlide>,
     ticks_per_beat: u64,
+    measure_base: u32,
     current_speed_group: Option<u32>,
     chart: Chart,
     pending_standard_air: Vec<PendingStandardAir>,
@@ -930,6 +931,7 @@ impl Parser {
             pending_holds: HashMap::new(),
             pending_sliders: HashMap::new(),
             ticks_per_beat: 480,
+            measure_base: 0,
             current_speed_group: None,
             chart: Chart::new(),
             pending_standard_air: Vec::new(),
@@ -967,11 +969,25 @@ impl Parser {
                 self.current_speed_group = None;
                 continue;
             }
-            if command.starts_with("MEASUREHS") || command.starts_with("MEASUREBS") {
-                return Err(SusError::UnsupportedCommand {
+            if command.starts_with("MEASUREBS") {
+                let value = command
+                    .split_whitespace()
+                    .nth(1)
+                    .ok_or(SusError::MalformedCommand { line })?;
+                self.measure_base = value.parse().map_err(|_| SusError::InvalidValue {
                     line,
-                    command: command.to_owned(),
-                });
+                    value: value.to_owned(),
+                })?;
+                continue;
+            }
+            if command.starts_with("MEASUREHS") {
+                // The IR has no barline rendering state, so this display-only command is ignored.
+                let value = command
+                    .split_whitespace()
+                    .nth(1)
+                    .ok_or(SusError::MalformedCommand { line })?;
+                parse_group(line, value)?;
+                continue;
             }
 
             let Some((header, data)) = command.split_once(':') else {
@@ -1112,8 +1128,15 @@ impl Parser {
             let position = self
                 .timeline
                 .position(
-                    u32::from_str_radix(&header[..2], 16)
-                        .map_err(|_| SusError::MalformedCommand { line })?,
+                    self.measure_base
+                        .checked_add(
+                            u32::from_str_radix(&header[..2], 16)
+                                .map_err(|_| SusError::MalformedCommand { line })?,
+                        )
+                        .ok_or(SusError::InvalidValue {
+                            line,
+                            value: header[..2].to_owned(),
+                        })?,
                     u64::from_str_radix(&header[2..], 16)
                         .map_err(|_| SusError::MalformedCommand { line })?,
                     self.ticks_per_beat
@@ -1130,8 +1153,16 @@ impl Parser {
             );
             return Ok(());
         }
-        let measure = u32::from_str_radix(&header[..2], 16)
-            .map_err(|_| SusError::MalformedCommand { line })?;
+        let measure = self
+            .measure_base
+            .checked_add(
+                u32::from_str_radix(&header[..2], 16)
+                    .map_err(|_| SusError::MalformedCommand { line })?,
+            )
+            .ok_or(SusError::InvalidValue {
+                line,
+                value: header[..2].to_owned(),
+            })?;
         let tick = u64::from_str_radix(&header[2..], 16)
             .map_err(|_| SusError::MalformedCommand { line })?;
         let ticks_per_measure =
@@ -1393,7 +1424,7 @@ impl Parser {
         let value = command.trim_start_matches("REQUEST").trim();
         let fields: Vec<_> = value.trim_matches('"').split_whitespace().collect();
         if fields.len() == 2 && fields[0] == "enable_priority" {
-            if matches!(fields[1], "0" | "1") {
+            if matches!(fields[1], "0" | "1" | "true" | "false") {
                 return Ok(());
             }
             return Err(SusError::InvalidValue {
@@ -1502,9 +1533,17 @@ impl Parser {
     }
 
     fn parse_data_line(&mut self, line: usize, header: &str, data: &str) -> Result<(), SusError> {
-        let measure = header[..3]
-            .parse::<u32>()
-            .map_err(|_| SusError::MalformedCommand { line })?;
+        let measure = self
+            .measure_base
+            .checked_add(
+                header[..3]
+                    .parse::<u32>()
+                    .map_err(|_| SusError::MalformedCommand { line })?,
+            )
+            .ok_or(SusError::InvalidValue {
+                line,
+                value: header[..3].to_owned(),
+            })?;
         let kind = &header[3..];
         if kind == "02" {
             let length = parse_position(data).map_err(|_| SusError::InvalidValue {
@@ -1532,6 +1571,7 @@ impl Parser {
             }
             '2' => self.parse_central_hold(line, lane, channel.unwrap(), data, positions),
             '3' => self.parse_slider(line, lane, channel.unwrap(), data, positions),
+            '4' => self.parse_slider(line, lane, channel.unwrap(), data, positions),
             '5' => self.parse_directional_notes(line, lane, data, positions),
             _ => Ok(()),
         }
@@ -2084,6 +2124,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_slide_two_channels() {
+        let chart = parse("#00140A: 144g\n#0024cA: 24").expect("valid SUS");
+
+        assert_eq!(chart.notes().len(), 1);
+        assert!(matches!(chart.notes()[0].kind(), NoteKind::Slide { points } if points.len() == 3));
+    }
+
+    #[test]
     fn parses_hispeed_definitions_and_applies_the_group_to_notes() {
         let source = "#TIL00: \"0'0:0.50, 1'0:2.00\"\n#HISPEED 00\n#00110: 14";
         let chart = parse(source).expect("valid speed definition");
@@ -2096,9 +2144,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_measure_speed_commands() {
-        let error = parse("#MEASUREHS 00").expect_err("unsupported measure speed state");
-        assert!(matches!(error, super::SusError::UnsupportedCommand { .. }));
+    fn ignores_measure_line_speed_commands() {
+        let chart = parse("#MEASUREHS 00\n#REQUEST \"enable_priority true\"\n#00110: 14")
+            .expect("valid SUS display commands");
+        assert_eq!(chart.notes().len(), 1);
+    }
+
+    #[test]
+    fn applies_measure_base_to_note_positions() {
+        let chart = parse("#MEASUREBS 10\n#00010: 14").expect("valid SUS");
+
+        assert_eq!(chart.notes()[0].position(), Position::new(40, 1).unwrap());
     }
 
     #[test]
