@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use chart::{
     AirColor, AirCrushColor, AirCrushInterval, AirCrushPoint, AirDirection, AirProperties, Chart,
-    ChartError, ChartMode, ExDirection, Lane, Note, NoteId, NoteKind, Position, ScrollScope,
-    ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange, report_loss,
+    ChartError, ChartMode, ExDirection, Lane, MeasureTimeline, Note, NoteId, NoteKind, Position,
+    ScrollScope, ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange, report_loss,
 };
 use thiserror::Error;
 
@@ -50,10 +50,11 @@ pub fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, C2sErro
     if chart.base_bpm().is_some() {
         report_loss("C2S", "SUS BASEBPM");
     }
+    let timeline = output_timeline(chart);
     let mut records = Vec::new();
     let mut speed_groups = BTreeSet::new();
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {
-        match output_position(tempo.position()) {
+        match output_position(tempo.position(), &timeline) {
             Ok((measure, tick)) => records.push(Record::new(
                 measure,
                 tick,
@@ -66,7 +67,7 @@ pub fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, C2sErro
     }
     for (index, change) in chart.scroll_speed_changes().iter().enumerate() {
         let record = (|| {
-            let (measure, tick) = output_position(change.position())?;
+            let (measure, tick) = output_position(change.position(), &timeline)?;
             let duration = change.duration().ok_or(C2sError::UnsupportedRecord {
                 line: 0,
                 record: "scroll speed without duration".to_owned(),
@@ -106,7 +107,15 @@ pub fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, C2sErro
     }
     for (index, note) in chart.notes().iter().enumerate() {
         let record_start = records.len();
-        match write_note(chart, index, note, &mut records, &speed_groups, mode) {
+        match write_note(
+            chart,
+            index,
+            note,
+            &mut records,
+            &speed_groups,
+            mode,
+            &timeline,
+        ) {
             Ok(()) => {}
             Err(error) if is_loss(&error) => {
                 records.truncate(record_start);
@@ -118,6 +127,16 @@ pub fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, C2sErro
     records.sort_by_key(|record| (record.measure, record.tick, record.order));
 
     let mut output = String::from("RESOLUTION\t384\n");
+    for &(measure, length) in chart.measure_lengths() {
+        let denominator = length
+            .denominator()
+            .checked_mul(4)
+            .ok_or(C2sError::UnrepresentablePosition)?;
+        output.push_str(&format!(
+            "MET\t{measure}\t0\t{}\t{denominator}\n",
+            length.numerator()
+        ));
+    }
     for record in records {
         output.push_str(&record.text);
         output.push('\n');
@@ -150,6 +169,7 @@ fn write_note(
     records: &mut Vec<Record>,
     speed_groups: &BTreeSet<u32>,
     mode: ChartMode,
+    timeline: &MeasureTimeline,
 ) -> Result<(), C2sError> {
     if !note.attributes().is_empty() {
         report_loss("C2S", "SUS note attributes");
@@ -165,7 +185,7 @@ fn write_note(
     {
         return Err(unsupported("AIR notation in XLAIR mode"));
     }
-    let (measure, tick) = output_position(note.position())?;
+    let (measure, tick) = output_position(note.position(), timeline)?;
     let (lane, width) = c2s_lane(note.lane())?;
     let id = NoteId::new(index as u32);
     let text = match note.kind() {
@@ -209,9 +229,11 @@ fn write_note(
                 duration_ticks(note.position(), *end)?
             )
         }
-        NoteKind::Slide { points } => write_slide(points, None)?,
-        NoteKind::ExSlide { points, .. } if mode == ChartMode::Xlair => write_slide(points, None)?,
-        NoteKind::ExSlide { points, direction } => write_slide(points, Some(*direction))?,
+        NoteKind::Slide { points } => write_slide(points, None, timeline)?,
+        NoteKind::ExSlide { points, .. } if mode == ChartMode::Xlair => {
+            write_slide(points, None, timeline)?
+        }
+        NoteKind::ExSlide { points, direction } => write_slide(points, Some(*direction), timeline)?,
         NoteKind::AirCrush {
             points,
             color,
@@ -257,7 +279,7 @@ fn write_note(
             points,
             color,
             parent,
-        } => write_air_slide(points, *color, *parent, chart)?,
+        } => write_air_slide(points, *color, *parent, chart, timeline)?,
     };
     records.push(Record::new(measure, tick, index, text));
     if let Some(group) = chart
@@ -281,7 +303,11 @@ fn write_note(
     Ok(())
 }
 
-fn write_slide(points: &[SlidePoint], direction: Option<ExDirection>) -> Result<String, C2sError> {
+fn write_slide(
+    points: &[SlidePoint],
+    direction: Option<ExDirection>,
+    timeline: &MeasureTimeline,
+) -> Result<String, C2sError> {
     if points.len() < 2 {
         return Err(unsupported("slide without an end point"));
     }
@@ -304,7 +330,7 @@ fn write_slide(points: &[SlidePoint], direction: Option<ExDirection>) -> Result<
         .windows(2)
         .enumerate()
         .map(|(index, segment)| {
-            let (measure, tick) = output_position(segment[0].position())?;
+            let (measure, tick) = output_position(segment[0].position(), timeline)?;
             let (start_lane, start_width) = c2s_lane(segment[0].lane())?;
             let (end_lane, end_width) = c2s_lane(segment[1].lane())?;
             let kind = if index + 1 == points.len() - 1 {
@@ -331,6 +357,7 @@ fn write_air_slide(
     color: AirColor,
     parent: NoteId,
     chart: &Chart,
+    timeline: &MeasureTimeline,
 ) -> Result<String, C2sError> {
     if points.len() < 2 {
         return Err(unsupported("AIR Slide without an end point"));
@@ -347,7 +374,7 @@ fn write_air_slide(
         .map(|(index, segment)| {
             let start = &segment[0];
             let end = &segment[1];
-            let (measure, tick) = output_position(start.position())?;
+            let (measure, tick) = output_position(start.position(), timeline)?;
             let (start_lane, start_width) = c2s_lane(start.lane())?;
             let (end_lane, end_width) = c2s_lane(end.lane())?;
             let kind = "ASD";
@@ -396,12 +423,30 @@ fn c2s_lane(lane: Lane) -> Result<(u8, u8), C2sError> {
     }
 }
 
-fn output_position(position: Position) -> Result<(u32, u64), C2sError> {
-    let ticks = output_ticks(position)?;
+fn output_position(position: Position, timeline: &MeasureTimeline) -> Result<(u32, u64), C2sError> {
+    let (measure, tick) = timeline
+        .locate(position, 96)
+        .map_err(|_| C2sError::UnrepresentablePosition)?;
+    let measure_ticks = timeline
+        .ticks(measure, 96)
+        .map_err(|_| C2sError::UnrepresentablePosition)?;
+    let tick = u128::from(tick) * 384;
+    let denominator = u128::from(measure_ticks);
+    if tick % denominator != 0 {
+        return Err(C2sError::UnrepresentablePosition);
+    }
     Ok((
-        u32::try_from(ticks / 384).map_err(|_| C2sError::UnrepresentablePosition)?,
-        ticks % 384,
+        measure,
+        u64::try_from(tick / denominator).map_err(|_| C2sError::UnrepresentablePosition)?,
     ))
+}
+
+fn output_timeline(chart: &Chart) -> MeasureTimeline {
+    let mut timeline = MeasureTimeline::new(Position::new(4, 1).expect("valid position"));
+    for &(measure, length) in chart.measure_lengths() {
+        timeline.set_length(measure, length);
+    }
+    timeline
 }
 
 fn output_ticks(position: Position) -> Result<u64, C2sError> {
@@ -650,6 +695,9 @@ impl Parser {
         let length = Position::new(length_numerator, denominator)
             .map_err(|source| C2sError::Chart { line, source })?;
         self.timeline.set_length(measure, length);
+        self.chart
+            .set_measure_length(measure, length)
+            .map_err(|source| C2sError::Chart { line, source })?;
         Ok(())
     }
 
@@ -1384,6 +1432,25 @@ mod tests {
         assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::Tap));
         assert!(matches!(chart.notes()[1].kind(), NoteKind::Hold { .. }));
         assert!(matches!(chart.notes()[2].kind(), NoteKind::Slide { .. }));
+    }
+
+    #[test]
+    fn preserves_variable_measure_lengths_when_writing_c2s() {
+        let source = concat!(
+            "RESOLUTION\t384\n",
+            "MET\t0\t0\t3\t4\n",
+            "MET\t1\t0\t5\t4\n",
+            "TAP\t0\t0\t0\t4\n",
+            "TAP\t1\t0\t4\t4\n",
+        );
+        let chart = parse(source).expect("valid variable-length C2S");
+        let written = write(&chart).expect("valid variable-length C2S output");
+        assert!(written.contains("MET\t0\t0\t3\t4\n"));
+        assert!(written.contains("MET\t1\t0\t5\t4\n"));
+
+        let reparsed = parse(&written).expect("round-tripped variable-length C2S");
+        assert_eq!(reparsed.measure_lengths(), chart.measure_lengths());
+        assert_eq!(reparsed.notes(), chart.notes());
     }
 
     #[test]
