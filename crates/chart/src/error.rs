@@ -30,6 +30,8 @@ pub enum ChartError {
     InvalidScrollSpeedDuration,
     #[error("air height must be finite and non-negative")]
     InvalidAirHeight,
+    #[error("note attribute value is invalid")]
+    InvalidNoteAttribute,
     #[error("air crush interval must be greater than zero")]
     InvalidAirCrushInterval,
     #[error("note id does not refer to a note in the chart")]
