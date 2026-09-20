@@ -557,14 +557,20 @@ fn write_standard_note(
                 ticks_per_measure,
             )?),
         },
-        NoteKind::ExTap { direction } => lines.push(standard_channel_line(
-            note.position(),
-            '5',
-            start,
-            standard_ex_direction(*direction)?,
-            width,
-            ticks_per_measure,
-        )?),
+        NoteKind::ExTap { direction } => {
+            if let Ok(direction) = standard_ex_direction(*direction) {
+                lines.push(standard_channel_line(
+                    note.position(),
+                    '5',
+                    start,
+                    direction,
+                    width,
+                    ticks_per_measure,
+                )?);
+            } else {
+                lines.push(format!("{prefix}: 02{lane_width}"));
+            }
+        }
         NoteKind::Mine => lines.push(format!("{prefix}: 10{lane_width}")),
         NoteKind::Hold { end } | NoteKind::ExHold { end, .. } => {
             let duration = duration_ticks(note.position(), *end, ticks_per_measure)?;
@@ -1065,7 +1071,9 @@ impl Parser {
                 .map(|(index, _)| NoteId::new(index as u32))
                 .ok_or_else(|| SusError::InvalidValue {
                     line: 0,
-                    value: "standard SUS AIR without a parent".to_owned(),
+                    value: format!(
+                        "standard SUS AIR without a parent at {position:?}, lane {lane:?}, target {target:?}"
+                    ),
                 })?;
             let kind = match kind {
                 NoteKind::Air { properties, .. } => NoteKind::Air { properties, parent },
