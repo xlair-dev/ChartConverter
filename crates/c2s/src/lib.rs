@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use chart::{
     AirColor, AirCrushColor, AirCrushInterval, AirCrushPoint, AirDirection, AirProperties, Chart,
-    ChartError, ExDirection, Lane, Note, NoteId, NoteKind, Position, ScrollScope,
+    ChartError, ChartMode, ExDirection, Lane, Note, NoteId, NoteKind, Position, ScrollScope,
     ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange, report_loss,
 };
 use thiserror::Error;
@@ -27,13 +27,23 @@ pub enum C2sError {
 
 /// Parses a C2S document into the shared chart model.
 pub fn parse(source: &str) -> Result<Chart, C2sError> {
-    Parser::new().parse(source)
+    parse_with_mode(source, ChartMode::Normal)
+}
+
+/// Parses a C2S document using the selected interpretation mode.
+pub fn parse_with_mode(source: &str, mode: ChartMode) -> Result<Chart, C2sError> {
+    Parser::new(mode).parse(source)
 }
 
 /// Writes the representable shared chart model as a C2S document.
 ///
 /// Unsupported or unrepresentable chart information is omitted and reported to stdout.
 pub fn write(chart: &Chart) -> Result<String, C2sError> {
+    write_with_mode(chart, ChartMode::Normal)
+}
+
+/// Writes a C2S document using the selected interpretation mode.
+pub fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, C2sError> {
     let mut records = Vec::new();
     let mut speed_groups = BTreeSet::new();
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {
@@ -90,7 +100,7 @@ pub fn write(chart: &Chart) -> Result<String, C2sError> {
     }
     for (index, note) in chart.notes().iter().enumerate() {
         let record_start = records.len();
-        match write_note(chart, index, note, &mut records, &speed_groups) {
+        match write_note(chart, index, note, &mut records, &speed_groups, mode) {
             Ok(()) => {}
             Err(error) if is_loss(&error) => {
                 records.truncate(record_start);
@@ -133,7 +143,19 @@ fn write_note(
     note: &Note,
     records: &mut Vec<Record>,
     speed_groups: &BTreeSet<u32>,
+    mode: ChartMode,
 ) -> Result<(), C2sError> {
+    if mode == ChartMode::Xlair
+        && matches!(
+            note.kind(),
+            NoteKind::Air { .. }
+                | NoteKind::AirHold { .. }
+                | NoteKind::AirSlide { .. }
+                | NoteKind::AirCrush { .. }
+        )
+    {
+        return Err(unsupported("AIR notation in XLAIR mode"));
+    }
     let (measure, tick) = output_position(note.position())?;
     let (lane, width) = c2s_lane(note.lane())?;
     let id = NoteId::new(index as u32);
@@ -141,32 +163,39 @@ fn write_note(
         NoteKind::Tap(kind) => {
             let tag = match kind {
                 TapKind::Tap => "TAP",
-                TapKind::XTap => {
-                    return Err(unsupported("XTap cannot be represented by C2S"));
-                }
+                TapKind::XTap => "CHR",
                 TapKind::Flick { direction: None } => "FLK",
                 TapKind::Flick { direction: Some(_) } => {
                     return Err(unsupported(
                         "directional Flick cannot be represented by C2S",
                     ));
                 }
+                TapKind::Tap4 | TapKind::Tap5 | TapKind::Tap6 => {
+                    return Err(unsupported("SUS tap variant cannot be represented by C2S"));
+                }
             };
-            format!("{tag}\t{measure}\t{tick}\t{lane}\t{width}")
+            if *kind == TapKind::XTap {
+                format!("{tag}\t{measure}\t{tick}\t{lane}\t{width}\tUP")
+            } else {
+                format!("{tag}\t{measure}\t{tick}\t{lane}\t{width}")
+            }
         }
-        NoteKind::ExTap { direction } => format!(
-            "CHR\t{measure}\t{tick}\t{lane}\t{width}\t{}",
-            encode_ex_direction(*direction)
-        ),
+        NoteKind::ExTap { direction } => {
+            let direction = encode_ex_direction(*direction)?;
+            format!("CHR\t{measure}\t{tick}\t{lane}\t{width}\t{direction}")
+        }
         NoteKind::Mine => format!("MNE\t{measure}\t{tick}\t{lane}\t{width}"),
         NoteKind::Hold { end } => format!(
             "HLD\t{measure}\t{tick}\t{lane}\t{width}\t{}",
             duration_ticks(note.position(), *end)?
         ),
-        NoteKind::ExHold { end, direction } => format!(
-            "HXD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}",
-            duration_ticks(note.position(), *end)?,
-            encode_ex_direction(*direction)
-        ),
+        NoteKind::ExHold { end, direction } => {
+            let direction = encode_ex_direction(*direction)?;
+            format!(
+                "HXD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{direction}",
+                duration_ticks(note.position(), *end)?
+            )
+        }
         NoteKind::Slide { points } => write_slide(points, None)?,
         NoteKind::ExSlide { points, direction } => write_slide(points, Some(*direction))?,
         NoteKind::AirCrush {
@@ -275,7 +304,7 @@ fn write_slide(points: &[SlidePoint], direction: Option<ExDirection>) -> Result<
             );
             if let Some(direction) = direction {
                 record.push('\t');
-                record.push_str(encode_ex_direction(direction));
+                record.push_str(encode_ex_direction(direction)?);
             }
             Ok(record)
         })
@@ -397,16 +426,20 @@ fn note_duration_ticks(note: &Note) -> Result<u64, C2sError> {
     }
 }
 
-fn encode_ex_direction(direction: ExDirection) -> &'static str {
+fn encode_ex_direction(direction: ExDirection) -> Result<&'static str, C2sError> {
     match direction {
-        ExDirection::Up => "UP",
-        ExDirection::Down => "DW",
-        ExDirection::Center => "CE",
-        ExDirection::All => "RC",
-        ExDirection::Wide => "LC",
-        ExDirection::Left => "LS",
-        ExDirection::Right => "RS",
-        ExDirection::Inward => "BS",
+        ExDirection::Up => Ok("UP"),
+        ExDirection::Down => Ok("DW"),
+        ExDirection::Center => Ok("CE"),
+        ExDirection::All => Ok("RC"),
+        ExDirection::Wide => Ok("LC"),
+        ExDirection::Left => Ok("LS"),
+        ExDirection::Right => Ok("RS"),
+        ExDirection::Inward => Ok("BS"),
+        ExDirection::UpperLeft
+        | ExDirection::UpperRight
+        | ExDirection::LowerLeft
+        | ExDirection::LowerRight => Err(unsupported("diagonal Ex direction")),
     }
 }
 
@@ -464,6 +497,7 @@ fn is_loss(error: &C2sError) -> bool {
 }
 
 struct Parser {
+    mode: ChartMode,
     resolution: Option<u64>,
     timeline: chart::MeasureTimeline,
     chart: Chart,
@@ -477,8 +511,9 @@ struct Parser {
 }
 
 impl Parser {
-    fn new() -> Self {
+    fn new(mode: ChartMode) -> Self {
         Self {
+            mode,
             resolution: None,
             timeline: chart::MeasureTimeline::new(Position::new(4, 1).unwrap()),
             chart: Chart::new(),
@@ -617,6 +652,7 @@ impl Parser {
             TapKind::Tap => self.last_tap_parent = Some(id),
             TapKind::Flick { .. } => self.last_flick_parent = Some(id),
             TapKind::XTap => {}
+            TapKind::Tap4 | TapKind::Tap5 | TapKind::Tap6 => {}
         }
         Ok(())
     }
@@ -646,15 +682,21 @@ impl Parser {
             fields.get(5).ok_or(C2sError::MalformedRecord { line })?,
         )?;
         let position = self.position(line, measure, tick)?;
-        let id = self.add_note(
-            line,
-            Note::new(position, lane, NoteKind::ExTap { direction }),
-        )?;
+        let kind = if self.mode == ChartMode::Xlair {
+            NoteKind::Tap(TapKind::XTap)
+        } else {
+            NoteKind::ExTap { direction }
+        };
+        let id = self.add_note(line, Note::new(position, lane, kind))?;
         self.last_ex_parent = Some(id);
         Ok(())
     }
 
     fn parse_air(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+        if self.mode == ChartMode::Xlair {
+            report_loss("C2S", "AIR notation in XLAIR mode");
+            return Ok(());
+        }
         let parent_type = *fields.get(5).ok_or(C2sError::MalformedRecord { line })?;
         let parent = match parent_type {
             "CHR" => self.last_ex_parent,
@@ -875,6 +917,10 @@ impl Parser {
     }
 
     fn parse_air_hold(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+        if self.mode == ChartMode::Xlair {
+            report_loss("C2S", "AIR notation in XLAIR mode");
+            return Ok(());
+        }
         let (measure, tick) = self.location(line, fields)?;
         let lane = self.lane(
             line,
@@ -913,6 +959,10 @@ impl Parser {
     }
 
     fn parse_air_slide(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+        if self.mode == ChartMode::Xlair {
+            report_loss("C2S", "AIR notation in XLAIR mode");
+            return Ok(());
+        }
         let (measure, tick) = self.location(line, fields)?;
         let start_lane = self.lane(
             line,
@@ -1022,6 +1072,10 @@ impl Parser {
     }
 
     fn parse_air_crush(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
+        if self.mode == ChartMode::Xlair {
+            report_loss("C2S", "AIR notation in XLAIR mode");
+            return Ok(());
+        }
         let (measure, tick) = self.location(line, fields)?;
         let lane = self.lane(
             line,
@@ -1661,5 +1715,33 @@ mod tests {
         assert!(c2s.contains("SXD\t0\t96\t4\t4\t96\t8\t4\tBS"));
         let parsed = parse(&c2s).expect("round-tripped C2S output");
         assert_eq!(parsed.notes(), chart.notes());
+    }
+
+    #[test]
+    fn applies_xlair_mode_to_c2s_chr_notes() {
+        let source = "RESOLUTION\t384\nCHR\t0\t0\t4\t2\tDW\n";
+        let normal = super::parse_with_mode(source, chart::ChartMode::Normal).unwrap();
+        assert!(matches!(normal.notes()[0].kind(), NoteKind::ExTap { .. }));
+        let xlair = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(xlair.notes()[0].kind(), &NoteKind::Tap(TapKind::XTap));
+
+        let output = super::write_with_mode(&xlair, chart::ChartMode::Xlair).unwrap();
+        let reparsed = super::parse_with_mode(&output, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(reparsed.notes(), xlair.notes());
+    }
+
+    #[test]
+    fn omits_air_notes_in_xlair_mode() {
+        let source = concat!(
+            "RESOLUTION\t384\n",
+            "TAP\t0\t0\t4\t2\n",
+            "AIR\t0\t0\t4\t2\tTAP\tDEF\n",
+        );
+        let chart = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(chart.notes().len(), 1);
+        assert!(matches!(
+            chart.notes()[0].kind(),
+            NoteKind::Tap(TapKind::Tap)
+        ));
     }
 }

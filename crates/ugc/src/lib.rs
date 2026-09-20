@@ -4,9 +4,9 @@ use std::collections::BTreeSet;
 
 use chart::{
     AirColor, AirCrushColor, AirCrushInterval, AirCrushPoint, AirDirection, AirPoint,
-    AirProperties, Chart, ChartError, ExDirection, Lane, MeasureTimeline, Note, NoteId, NoteKind,
-    Position, ScrollScope, ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind, TempoChange,
-    report_loss,
+    AirProperties, Chart, ChartError, ChartMode, ExDirection, Lane, MeasureTimeline, Note, NoteId,
+    NoteKind, Position, ScrollScope, ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind,
+    TempoChange, report_loss,
 };
 use thiserror::Error;
 
@@ -30,13 +30,23 @@ pub enum UgcError {
 
 /// Parses a UGC document into the shared chart model.
 pub fn parse(source: &str) -> Result<Chart, UgcError> {
-    Parser::new().parse(source)
+    parse_with_mode(source, ChartMode::Normal)
+}
+
+/// Parses a UGC document using the selected interpretation mode.
+pub fn parse_with_mode(source: &str, mode: ChartMode) -> Result<Chart, UgcError> {
+    Parser::new(mode).parse(source)
 }
 
 /// Writes the representable shared chart model as a fixed 4/4 UGC document.
 ///
 /// Unsupported or unrepresentable chart information is omitted and reported to stdout.
 pub fn write(chart: &Chart) -> Result<String, UgcError> {
+    write_with_mode(chart, ChartMode::Normal)
+}
+
+/// Writes a UGC document using the selected interpretation mode.
+pub fn write_with_mode(chart: &Chart, _mode: ChartMode) -> Result<String, UgcError> {
     let mut tempo_records = Vec::new();
     for tempo in chart.tempo_changes() {
         match output_position(tempo.position()) {
@@ -89,7 +99,7 @@ pub fn write(chart: &Chart) -> Result<String, UgcError> {
     let mut note_records = Vec::new();
     for (index, note) in chart.notes().iter().enumerate() {
         let note_id = NoteId::new(index as u32);
-        match write_note(chart, note_id, note) {
+        match write_note(chart, note_id, note, _mode) {
             Ok(mut record) => {
                 if let Some(group) = record.speed_group
                     && !speed_groups.contains(&group)
@@ -148,7 +158,25 @@ struct OutputRecord {
     text: String,
 }
 
-fn write_note(chart: &Chart, note_id: NoteId, note: &Note) -> Result<OutputRecord, UgcError> {
+fn write_note(
+    chart: &Chart,
+    note_id: NoteId,
+    note: &Note,
+    mode: ChartMode,
+) -> Result<OutputRecord, UgcError> {
+    if mode == ChartMode::Xlair
+        && matches!(
+            note.kind(),
+            NoteKind::Air { .. }
+                | NoteKind::AirHold { .. }
+                | NoteKind::AirSlide { .. }
+                | NoteKind::AirCrush { .. }
+        )
+    {
+        return Err(UgcError::UnsupportedNote {
+            note: "AIR notation in XLAIR mode".to_owned(),
+        });
+    }
     let (measure, tick) = output_position(note.position())?;
     let (lane, width) = central_lane(note.lane())?;
     let prefix = format!("#{measure}'{tick}:");
@@ -171,22 +199,23 @@ fn write_note(chart: &Chart, note_id: NoteId, note: &Note) -> Result<OutputRecor
                 }
                 _ => None,
             };
-            let include_ex_carrier = ex_direction.is_some_and(|direction| {
-                !chart.notes().iter().enumerate().any(|(index, candidate)| {
-                    index != note_id.value() as usize
-                        && candidate.position() == note.position()
-                        && candidate.lane() == note.lane()
-                        && matches!(
-                            candidate.kind(),
-                            NoteKind::ExTap {
-                                direction: candidate_direction
-                            } if *candidate_direction == direction
-                        )
-                })
-            });
+            let include_ex_carrier = mode != ChartMode::Xlair
+                && ex_direction.is_some_and(|direction| {
+                    !chart.notes().iter().enumerate().any(|(index, candidate)| {
+                        index != note_id.value() as usize
+                            && candidate.position() == note.position()
+                            && candidate.lane() == note.lane()
+                            && matches!(
+                                candidate.kind(),
+                                NoteKind::ExTap {
+                                    direction: candidate_direction
+                                } if *candidate_direction == direction
+                            )
+                    })
+                });
             (
                 None,
-                write_non_air_note(note, &prefix, lane, width, include_ex_carrier)?,
+                write_non_air_note(note, &prefix, lane, width, include_ex_carrier, mode)?,
             )
         }
     };
@@ -225,6 +254,7 @@ fn write_non_air_note(
     lane: u8,
     width: u8,
     include_ex_carrier: bool,
+    mode: ChartMode,
 ) -> Result<String, UgcError> {
     let text = match note.kind() {
         NoteKind::Tap(kind) => {
@@ -232,11 +262,17 @@ fn write_non_air_note(
                 TapKind::Tap => 't',
                 TapKind::XTap => 'x',
                 TapKind::Flick { .. } => 'f',
+                TapKind::Tap4 | TapKind::Tap5 | TapKind::Tap6 => {
+                    return Err(UgcError::UnsupportedNote {
+                        note: "SUS tap variant".to_owned(),
+                    });
+                }
             };
             let suffix = match kind {
                 TapKind::Tap => "".to_owned(),
                 TapKind::XTap => "".to_owned(),
                 TapKind::Flick { direction } => encode_flick_direction(*direction)?,
+                TapKind::Tap4 | TapKind::Tap5 | TapKind::Tap6 => unreachable!(),
             };
             format!(
                 "{prefix}{type_code}{}{}{suffix}\n",
@@ -244,12 +280,16 @@ fn write_non_air_note(
                 encode_base36(width)
             )
         }
+        NoteKind::ExTap { .. } if mode == ChartMode::Xlair => {
+            format!("{prefix}x{}{}\n", encode_base36(lane), encode_base36(width),)
+        }
         NoteKind::ExTap { direction } => {
+            let direction = encode_ex_direction(*direction)?;
             format!(
                 "{prefix}x{}{}{}\n",
                 encode_base36(lane),
                 encode_base36(width),
-                encode_ex_direction(*direction)
+                direction
             )
         }
         NoteKind::Mine => format!("{prefix}d{}{}\n", encode_base36(lane), encode_base36(width)),
@@ -266,12 +306,13 @@ fn write_non_air_note(
         }
         NoteKind::ExHold { end, direction } => {
             let offset = relative_tick(note.position(), *end)?;
+            let direction = encode_ex_direction(*direction)?;
             let carrier = if include_ex_carrier {
                 format!(
                     "{prefix}x{}{}{}\n",
                     encode_base36(lane),
                     encode_base36(width),
-                    encode_ex_direction(*direction)
+                    direction
                 )
             } else {
                 String::new()
@@ -301,12 +342,13 @@ fn write_non_air_note(
             text
         }
         NoteKind::ExSlide { points, direction } => {
+            let direction = encode_ex_direction(*direction)?;
             let carrier = if include_ex_carrier {
                 format!(
                     "{prefix}x{}{}{}\n",
                     encode_base36(lane),
                     encode_base36(width),
-                    encode_ex_direction(*direction)
+                    direction
                 )
             } else {
                 String::new()
@@ -505,16 +547,22 @@ fn encode_base36(value: u8) -> char {
     char::from(DIGITS[usize::from(value)])
 }
 
-fn encode_ex_direction(direction: ExDirection) -> &'static str {
+fn encode_ex_direction(direction: ExDirection) -> Result<&'static str, UgcError> {
     match direction {
-        ExDirection::Up => "U",
-        ExDirection::Down => "D",
-        ExDirection::Center => "C",
-        ExDirection::All => "A",
-        ExDirection::Wide => "W",
-        ExDirection::Left => "L",
-        ExDirection::Right => "R",
-        ExDirection::Inward => "I",
+        ExDirection::Up => Ok("U"),
+        ExDirection::Down => Ok("D"),
+        ExDirection::Center => Ok("C"),
+        ExDirection::All => Ok("A"),
+        ExDirection::Wide => Ok("W"),
+        ExDirection::Left => Ok("L"),
+        ExDirection::Right => Ok("R"),
+        ExDirection::Inward => Ok("I"),
+        ExDirection::UpperLeft
+        | ExDirection::UpperRight
+        | ExDirection::LowerLeft
+        | ExDirection::LowerRight => Err(UgcError::UnsupportedNote {
+            note: "diagonal Ex direction".to_owned(),
+        }),
     }
 }
 
@@ -599,6 +647,7 @@ fn encode_base36_u32(value: u32) -> char {
 }
 
 struct Parser {
+    mode: ChartMode,
     ticks_per_beat: u64,
     timeline: MeasureTimeline,
     chart: Chart,
@@ -614,8 +663,9 @@ struct ParsedLongNote {
 }
 
 impl Parser {
-    fn new() -> Self {
+    fn new(mode: ChartMode) -> Self {
         Self {
+            mode,
             ticks_per_beat: 480,
             timeline: MeasureTimeline::new(Position::new(4, 1).unwrap()),
             chart: Chart::new(),
@@ -893,6 +943,7 @@ impl Parser {
                 let tap_kind = match kind {
                     't' => TapKind::Tap,
                     'x' if code[3..].is_empty() => TapKind::XTap,
+                    'x' if self.mode == ChartMode::Xlair => TapKind::XTap,
                     'x' => return self.parse_ex_tap(line, position, lane, &code[3..]),
                     'f' => TapKind::Flick {
                         direction: parse_flick_direction(line, &code[3..])?,
@@ -954,6 +1005,10 @@ impl Parser {
         lane_code: &str,
         attributes: &str,
     ) -> Result<(usize, Option<Note>), UgcError> {
+        if self.mode == ChartMode::Xlair {
+            report_loss("UGC", "AIR notation in XLAIR mode");
+            return Ok((0, None));
+        }
         let parent = self.last_parent.ok_or(UgcError::InvalidValue {
             line,
             value: "AIR without a parent note".to_owned(),
@@ -975,6 +1030,14 @@ impl Parser {
         attributes: &str,
         following: &[&str],
     ) -> Result<(usize, Option<Note>), UgcError> {
+        if self.mode == ChartMode::Xlair {
+            report_loss("UGC", "AIR notation in XLAIR mode");
+            let consumed = following
+                .iter()
+                .take_while(|follower| parse_follower(follower.trim()).is_some())
+                .count();
+            return Ok((consumed, None));
+        }
         let parent = self.last_parent.ok_or(UgcError::InvalidValue {
             line,
             value: "AIR Crush without a parent note".to_owned(),
@@ -1108,6 +1171,14 @@ impl Parser {
         attributes: &str,
         following: &[&str],
     ) -> Result<(usize, Option<Note>), UgcError> {
+        if self.mode == ChartMode::Xlair {
+            report_loss("UGC", "AIR notation in XLAIR mode");
+            let consumed = following
+                .iter()
+                .take_while(|follower| parse_follower(follower.trim()).is_some())
+                .count();
+            return Ok((consumed, None));
+        }
         let parent = self.last_parent.ok_or(UgcError::InvalidValue {
             line,
             value: "AIR long note without a parent note".to_owned(),
@@ -1912,5 +1983,35 @@ mod tests {
         assert!(ugc.contains(">c6"));
         let parsed = parse(&ugc).expect("round-tripped AIR long UGC output");
         assert_eq!(parsed.notes(), chart.notes());
+    }
+
+    #[test]
+    fn applies_xlair_mode_to_ugc_extended_taps() {
+        let source = "@TICKS\t480\n@BEAT\t0\t4\t4\n@ENDHEAD\n#0'0:x04D\n";
+        let normal = super::parse_with_mode(source, chart::ChartMode::Normal).unwrap();
+        assert!(matches!(normal.notes()[0].kind(), NoteKind::ExTap { .. }));
+        let xlair = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(xlair.notes()[0].kind(), &NoteKind::Tap(TapKind::XTap));
+
+        let output = super::write_with_mode(&xlair, chart::ChartMode::Xlair).unwrap();
+        let reparsed = super::parse_with_mode(&output, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(reparsed.notes(), xlair.notes());
+    }
+
+    #[test]
+    fn omits_air_notes_in_xlair_mode() {
+        let source = concat!(
+            "@TICKS\t480\n",
+            "@BEAT\t0\t4\t4\n",
+            "@ENDHEAD\n",
+            "#0'0:t04\n",
+            "#0'0:a04UN\n",
+        );
+        let chart = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(chart.notes().len(), 1);
+        assert!(matches!(
+            chart.notes()[0].kind(),
+            NoteKind::Tap(TapKind::Tap)
+        ));
     }
 }

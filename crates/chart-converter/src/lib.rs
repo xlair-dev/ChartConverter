@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use chart::Chart;
+use chart::{Chart, ChartMode};
 use thiserror::Error;
 
 /// A chart format supported by the converter.
@@ -10,9 +10,9 @@ use thiserror::Error;
 pub enum Format {
     /// The C2S format.
     C2s,
-    /// The XLAIR-compatible SUS subset implemented by the `sus` crate.
+    /// The general SUS format implemented by the `sus` crate.
     Sus,
-    /// The supported UGC subset implemented by the `ugc` crate.
+    /// The UGC format implemented by the `ugc` crate.
     Ugc,
 }
 
@@ -100,12 +100,32 @@ pub fn parse_bytes(format: Format, source: &[u8]) -> Result<Chart, ConverterErro
     parse(format, &source)
 }
 
+/// Parses chart bytes using the selected format interpretation mode.
+pub fn parse_bytes_with_mode(
+    format: Format,
+    mode: ChartMode,
+    source: &[u8],
+) -> Result<Chart, ConverterError> {
+    let source =
+        decode_source(source).map_err(|source| ConverterError::Encoding { format, source })?;
+    parse_with_mode(format, mode, &source)
+}
+
 /// Parses a chart using the frontend for `format`.
 pub fn parse(format: Format, source: &str) -> Result<Chart, ConverterError> {
+    parse_with_mode(format, ChartMode::Normal, source)
+}
+
+/// Parses a chart using the selected format frontend and interpretation mode.
+pub fn parse_with_mode(
+    format: Format,
+    mode: ChartMode,
+    source: &str,
+) -> Result<Chart, ConverterError> {
     let result = match format {
-        Format::C2s => c2s::parse(source).map_err(FormatError::from),
-        Format::Sus => sus::parse(source).map_err(FormatError::from),
-        Format::Ugc => ugc::parse(source).map_err(FormatError::from),
+        Format::C2s => c2s::parse_with_mode(source, mode).map_err(FormatError::from),
+        Format::Sus => sus::parse_with_mode(source, mode).map_err(FormatError::from),
+        Format::Ugc => ugc::parse_with_mode(source, mode).map_err(FormatError::from),
     };
     result.map_err(|source| ConverterError::Parse { format, source })
 }
@@ -114,10 +134,19 @@ pub fn parse(format: Format, source: &str) -> Result<Chart, ConverterError> {
 ///
 /// Unsupported or unrepresentable chart information is omitted and reported to stdout.
 pub fn write(format: Format, chart: &Chart) -> Result<String, ConverterError> {
+    write_with_mode(format, ChartMode::Normal, chart)
+}
+
+/// Writes a chart using the selected format backend and interpretation mode.
+pub fn write_with_mode(
+    format: Format,
+    mode: ChartMode,
+    chart: &Chart,
+) -> Result<String, ConverterError> {
     let result = match format {
-        Format::C2s => c2s::write(chart).map_err(FormatError::from),
-        Format::Sus => sus::write(chart).map_err(FormatError::from),
-        Format::Ugc => ugc::write(chart).map_err(FormatError::from),
+        Format::C2s => c2s::write_with_mode(chart, mode).map_err(FormatError::from),
+        Format::Sus => sus::write_with_mode(chart, mode).map_err(FormatError::from),
+        Format::Ugc => ugc::write_with_mode(chart, mode).map_err(FormatError::from),
     };
     result.map_err(|source| ConverterError::Write { format, source })
 }
@@ -128,8 +157,25 @@ pub fn convert(
     target_format: Format,
     source: &str,
 ) -> Result<String, ConverterError> {
-    let chart = parse(source_format, source)?;
-    write(target_format, &chart)
+    convert_with_modes(
+        source_format,
+        ChartMode::Normal,
+        target_format,
+        ChartMode::Normal,
+        source,
+    )
+}
+
+/// Converts a chart between formats using independent source and target modes.
+pub fn convert_with_modes(
+    source_format: Format,
+    source_mode: ChartMode,
+    target_format: Format,
+    target_mode: ChartMode,
+    source: &str,
+) -> Result<String, ConverterError> {
+    let chart = parse_with_mode(source_format, source_mode, source)?;
+    write_with_mode(target_format, target_mode, &chart)
 }
 
 /// Converts a chart file from one supported format to another.
@@ -138,8 +184,25 @@ pub fn convert_bytes(
     target_format: Format,
     source: &[u8],
 ) -> Result<String, ConverterError> {
-    let chart = parse_bytes(source_format, source)?;
-    write(target_format, &chart)
+    convert_bytes_with_modes(
+        source_format,
+        ChartMode::Normal,
+        target_format,
+        ChartMode::Normal,
+        source,
+    )
+}
+
+/// Converts chart bytes between formats using independent source and target modes.
+pub fn convert_bytes_with_modes(
+    source_format: Format,
+    source_mode: ChartMode,
+    target_format: Format,
+    target_mode: ChartMode,
+    source: &[u8],
+) -> Result<String, ConverterError> {
+    let chart = parse_bytes_with_mode(source_format, source_mode, source)?;
+    write_with_mode(target_format, target_mode, &chart)
 }
 
 fn decode_source(source: &[u8]) -> Result<String, SourceEncodingError> {
@@ -172,7 +235,7 @@ fn decode_utf16(
 
 #[cfg(test)]
 mod tests {
-    use chart::{Chart, Lane, Note, NoteKind, Position, TapKind};
+    use chart::{Chart, ChartMode, Lane, Note, NoteKind, Position, TapKind};
 
     use super::{Format, convert, parse_bytes, write};
 
@@ -253,5 +316,27 @@ mod tests {
 
         let chart = parse_bytes(Format::C2s, &bytes).expect("valid UTF-16LE C2S");
         assert_eq!(chart.notes().len(), 1);
+    }
+
+    #[test]
+    fn converts_with_independent_format_modes() {
+        let source = concat!(
+            "RESOLUTION\t384\n",
+            "TAP\t0\t0\t4\t2\n",
+            "CHR\t0\t0\t4\t2\tDW\n",
+            "AIR\t0\t0\t4\t2\tTAP\tDEF\n",
+        );
+        let output = super::convert_with_modes(
+            Format::C2s,
+            ChartMode::Xlair,
+            Format::Ugc,
+            ChartMode::Xlair,
+            source,
+        )
+        .expect("valid XLAIR conversion");
+        let chart = super::parse_with_mode(Format::Ugc, ChartMode::Xlair, &output)
+            .expect("valid XLAIR output");
+        assert_eq!(chart.notes().len(), 2);
+        assert_eq!(chart.notes()[1].kind(), &NoteKind::Tap(TapKind::XTap));
     }
 }

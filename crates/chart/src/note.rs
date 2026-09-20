@@ -249,6 +249,9 @@ pub enum TapKind {
     Tap,
     XTap,
     Flick { direction: Option<ExDirection> },
+    Tap4,
+    Tap5,
+    Tap6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -261,6 +264,10 @@ pub enum ExDirection {
     Left,
     Right,
     Inward,
+    UpperLeft,
+    UpperRight,
+    LowerLeft,
+    LowerRight,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
