@@ -53,6 +53,7 @@ pub struct Chart {
     scroll_speed_changes: Vec<ScrollSpeedChange>,
     measure_lengths: Vec<(u32, Position)>,
     priority_enabled: Option<bool>,
+    base_bpm: Option<f64>,
 }
 
 impl Chart {
@@ -78,6 +79,15 @@ impl Chart {
     /// Stores the SUS priority-rendering request when the source specifies it.
     pub fn set_priority_enabled(&mut self, enabled: bool) {
         self.priority_enabled = Some(enabled);
+    }
+
+    /// Stores the SUS base BPM used to interpret scroll-speed values.
+    pub fn set_base_bpm(&mut self, bpm: f64) -> Result<(), ChartError> {
+        if !bpm.is_finite() || bpm <= 0.0 {
+            return Err(ChartError::InvalidTempo);
+        }
+        self.base_bpm = Some(bpm);
+        Ok(())
     }
 
     /// Stores the length used by a SUS measure from this measure onward.
@@ -178,5 +188,10 @@ impl Chart {
     /// Returns the SUS priority-rendering request, if one was specified.
     pub fn priority_enabled(&self) -> Option<bool> {
         self.priority_enabled
+    }
+
+    /// Returns the SUS base BPM, if one was specified.
+    pub fn base_bpm(&self) -> Option<f64> {
+        self.base_bpm
     }
 }
