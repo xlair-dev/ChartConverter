@@ -676,10 +676,7 @@ impl Parser {
         )?;
         let position = self.position(line, measure, tick)?;
         let direction = parse_air_direction(line, fields[0])?;
-        let color = parse_air_color(
-            line,
-            fields.get(6).ok_or(C2sError::MalformedRecord { line })?,
-        )?;
+        let color = parse_air_color(line, fields.get(6).copied().unwrap_or("DEF"))?;
         let properties = AirProperties::new(direction).with_color(color);
         self.add_note(
             line,
@@ -889,10 +886,7 @@ impl Parser {
             line,
             fields.get(6).ok_or(C2sError::MalformedRecord { line })?,
         )?;
-        let color = parse_air_color(
-            line,
-            fields.get(7).ok_or(C2sError::MalformedRecord { line })?,
-        )?;
+        let color = parse_air_color(line, fields.get(7).copied().unwrap_or("DEF"))?;
         let start = self.position(line, measure, tick)?;
         let end = self.position(
             line,
@@ -1358,6 +1352,21 @@ mod tests {
                 && points[0].height() == 2.0
                 && points[1].height() == 2.5
         ));
+    }
+
+    #[test]
+    fn defaults_legacy_air_colors_to_normal() {
+        let source = "RESOLUTION\t384\nHLD\t0\t0\t0\t4\t192\nAIR\t0\t192\t0\t4\tHLD\nAHD\t1\t0\t0\t4\tHLD\t192\n";
+        let chart = parse(source).expect("valid legacy AIR record");
+
+        let NoteKind::Air { properties, .. } = chart.notes()[1].kind() else {
+            panic!("expected AIR note");
+        };
+        assert_eq!(properties.color(), chart::AirColor::Normal);
+        let NoteKind::AirHold { properties, .. } = chart.notes()[2].kind() else {
+            panic!("expected AIR Hold");
+        };
+        assert_eq!(properties.color(), chart::AirColor::Normal);
     }
 
     #[test]
