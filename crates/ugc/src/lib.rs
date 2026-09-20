@@ -682,6 +682,7 @@ struct Parser {
     in_header: bool,
     current_speed_group: Option<u32>,
     last_parent: Option<NoteId>,
+    offset_measure: bool,
 }
 
 struct ParsedLongNote {
@@ -700,6 +701,7 @@ impl Parser {
             in_header: true,
             current_speed_group: None,
             last_parent: None,
+            offset_measure: false,
         }
     }
 
@@ -842,6 +844,7 @@ impl Parser {
                     .set_base_bpm(bpm)
                     .map_err(|source| UgcError::Chart { line, source })?;
             }
+            "@FLAG" => self.parse_flag(line, value)?,
             "@SPDDEF" | "@SPDFLD" => {
                 return Err(UgcError::UnsupportedRecord {
                     line,
@@ -862,6 +865,17 @@ impl Parser {
             }
             "@USETIL" => self.parse_speed_group(line, value)?,
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn parse_flag(&mut self, line: usize, value: &str) -> Result<(), UgcError> {
+        let fields: Vec<_> = value.split_whitespace().collect();
+        if fields.len() != 2 {
+            return Err(UgcError::MalformedRecord { line });
+        }
+        if fields[0] == "SOFFSET" {
+            self.offset_measure = parse_bool(line, fields[1])?;
         }
         Ok(())
     }
@@ -1401,9 +1415,17 @@ impl Parser {
                     line,
                     value: self.ticks_per_beat.to_string(),
                 })?;
-        self.timeline
+        let position = self
+            .timeline
             .position(measure, tick, ticks_per_measure)
-            .map_err(|source| UgcError::Chart { line, source })
+            .map_err(|source| UgcError::Chart { line, source })?;
+        if self.offset_measure {
+            position
+                .checked_add(Position::new(4, 1).expect("valid measure offset"))
+                .map_err(|source| UgcError::Chart { line, source })
+        } else {
+            Ok(position)
+        }
     }
 }
 
@@ -1590,6 +1612,17 @@ fn parse_speed(line: usize, value: &str) -> Result<f64, UgcError> {
     })
 }
 
+fn parse_bool(line: usize, value: &str) -> Result<bool, UgcError> {
+    match value {
+        "TRUE" => Ok(true),
+        "FALSE" => Ok(false),
+        _ => Err(UgcError::InvalidValue {
+            line,
+            value: value.to_owned(),
+        }),
+    }
+}
+
 fn parse_u32(line: usize, value: &str) -> Result<u32, UgcError> {
     parse_u64(line, value)?
         .try_into()
@@ -1662,6 +1695,18 @@ mod tests {
         assert!(written.contains("@MAINBPM\t132.5\n"));
         let reparsed = parse(&written).expect("round-tripped UGC main BPM");
         assert_eq!(reparsed.base_bpm(), chart.base_bpm());
+    }
+
+    #[test]
+    fn applies_ugc_soffset_to_chart_positions() {
+        let source = "@TICKS\t480\n@FLAG\tSOFFSET\tTRUE\n@ENDHEAD\n#0'0:t04\n";
+        let chart = parse(source).expect("valid UGC SOFFSET");
+        assert_eq!(chart.notes()[0].position(), Position::new(4, 1).unwrap());
+
+        let written = write(&chart).expect("valid normalized UGC output");
+        assert!(written.contains("#1'0:t04\n"));
+        let reparsed = parse(&written).expect("round-tripped normalized UGC");
+        assert_eq!(reparsed.notes(), chart.notes());
     }
 
     #[test]
