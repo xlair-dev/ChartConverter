@@ -1,4 +1,3 @@
-
 use chart::{
     AirCrushColor, AirCrushInterval, AirCrushPoint, Chart, Lane, Note, NoteKind, Position,
     ScrollScope, ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind,
