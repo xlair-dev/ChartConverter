@@ -190,20 +190,31 @@ fn write_note(
     mode: ChartMode,
     timeline: &MeasureTimeline,
 ) -> Result<OutputRecord, UgcError> {
+    // XLAIR reuses UGC's diagonal AIR records for its side-device actions.
     if !note.attributes().is_empty() {
         report_loss("UGC", "SUS note attributes");
     }
     if mode == ChartMode::Xlair
         && matches!(
             note.kind(),
-            NoteKind::Air { .. }
-                | NoteKind::AirHold { .. }
-                | NoteKind::AirSlide { .. }
-                | NoteKind::AirCrush { .. }
+            NoteKind::Air { properties, .. }
+                if !properties
+                    .direction()
+                    .is_some_and(is_xlair_side_air_direction)
         )
     {
         return Err(UgcError::UnsupportedNote {
-            note: "AIR notation in XLAIR mode".to_owned(),
+            note: "non-side AIR notation in XLAIR mode".to_owned(),
+        });
+    }
+    if mode == ChartMode::Xlair
+        && matches!(
+            note.kind(),
+            NoteKind::AirHold { .. } | NoteKind::AirSlide { .. } | NoteKind::AirCrush { .. }
+        )
+    {
+        return Err(UgcError::UnsupportedNote {
+            note: "AIR long notation in XLAIR mode".to_owned(),
         });
     }
     let (measure, tick) = output_position(note.position(), timeline)?;
@@ -1061,6 +1072,8 @@ impl Parser {
         Ok((0, Some(note)))
     }
 
+    /// XLAIR reuses UGC's diagonal AIR records for side-device actions, so
+    /// those records must remain in the shared chart instead of being discarded.
     fn parse_air(
         &self,
         line: usize,
@@ -1068,16 +1081,16 @@ impl Parser {
         lane_code: &str,
         attributes: &str,
     ) -> Result<(usize, Option<Note>), UgcError> {
-        if self.mode == ChartMode::Xlair {
-            report_loss("UGC", "AIR notation in XLAIR mode");
-            return Ok((0, None));
-        }
         let parent = self.last_parent.ok_or(UgcError::InvalidValue {
             line,
             value: "AIR without a parent note".to_owned(),
         })?;
         let lane = parse_lane(line, lane_code)?;
         let direction = parse_air_direction(line, attributes.get(..2).unwrap_or(""))?;
+        if self.mode == ChartMode::Xlair && !is_xlair_side_air_direction(direction) {
+            report_loss("UGC", "non-side AIR notation in XLAIR mode");
+            return Ok((0, None));
+        }
         let properties =
             parse_air_properties(line, Some(direction), attributes.get(2..).unwrap_or(""))?;
         let note = Note::new(position, lane, NoteKind::Air { properties, parent })
@@ -1094,7 +1107,7 @@ impl Parser {
         following: &[&str],
     ) -> Result<(usize, Option<Note>), UgcError> {
         if self.mode == ChartMode::Xlair {
-            report_loss("UGC", "AIR notation in XLAIR mode");
+            report_loss("UGC", "AIR Crush notation in XLAIR mode");
             let consumed = following
                 .iter()
                 .take_while(|follower| parse_follower(follower.trim()).is_some())
@@ -1235,7 +1248,7 @@ impl Parser {
         following: &[&str],
     ) -> Result<(usize, Option<Note>), UgcError> {
         if self.mode == ChartMode::Xlair {
-            report_loss("UGC", "AIR notation in XLAIR mode");
+            report_loss("UGC", "AIR long notation in XLAIR mode");
             let consumed = following
                 .iter()
                 .take_while(|follower| parse_follower(follower.trim()).is_some())
@@ -1511,6 +1524,16 @@ fn parse_air_direction(line: usize, value: &str) -> Result<AirDirection, UgcErro
             value: value.to_owned(),
         }),
     }
+}
+
+fn is_xlair_side_air_direction(direction: AirDirection) -> bool {
+    matches!(
+        direction,
+        AirDirection::UpperLeft
+            | AirDirection::UpperRight
+            | AirDirection::LowerLeft
+            | AirDirection::LowerRight
+    )
 }
 
 fn parse_air_crush_color(line: usize, value: &str) -> Result<AirCrushColor, UgcError> {
@@ -2135,15 +2158,42 @@ mod tests {
     }
 
     #[test]
-    fn omits_air_notes_in_xlair_mode() {
+    fn preserves_xlair_side_air_notes() {
         let source = concat!(
             "@TICKS\t480\n",
             "@BEAT\t0\t4\t4\n",
             "@ENDHEAD\n",
             "#0'0:t04\n",
-            "#0'0:a04UN\n",
+            "#0'0:a04ULN\n",
         );
         let chart = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(chart.notes().len(), 2);
+        assert!(matches!(
+            chart.notes()[0].kind(),
+            NoteKind::Tap(TapKind::Tap)
+        ));
+        assert!(matches!(
+            chart.notes()[1].kind(),
+            NoteKind::Air { properties, .. }
+                if properties.direction() == Some(chart::AirDirection::UpperLeft)
+        ));
+
+        let written = super::write_with_mode(&chart, chart::ChartMode::Xlair).unwrap();
+        let reparsed = super::parse_with_mode(&written, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(reparsed.notes(), chart.notes());
+    }
+
+    #[test]
+    fn omits_non_side_air_notes_in_xlair_mode() {
+        let source = concat!(
+            "@TICKS\t480\n",
+            "@BEAT\t0\t4\t4\n",
+            "@ENDHEAD\n",
+            "#0'0:t04\n",
+            "#0'0:a04UCN\n",
+        );
+        let chart = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+
         assert_eq!(chart.notes().len(), 1);
         assert!(matches!(
             chart.notes()[0].kind(),
