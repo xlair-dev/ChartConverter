@@ -81,6 +81,11 @@ pub fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, SusErro
 
 fn write_xlair(chart: &Chart) -> Result<String, SusError> {
     let timeline = output_timeline(chart);
+    let ticks_per_beat = xlair_ticks_per_beat(chart, &timeline)?;
+    let timing = XlairTiming {
+        timeline: &timeline,
+        ticks_per_beat,
+    };
     let mut records = Vec::new();
     let mut bpm_definitions = Vec::new();
     let mut speed_definitions = BTreeMap::<u32, Vec<(u32, u64, f64)>>::new();
@@ -97,7 +102,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                 });
             };
             let group = speed_group(group)?;
-            let (measure, tick) = output_position(change.position(), &timeline)?;
+            let (measure, tick) = output_position(change.position(), &timing)?;
             Ok((group, measure, tick, change.speed()))
         })();
         match definition {
@@ -113,7 +118,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
         definitions.sort_by_key(|(measure, tick, _)| (*measure, *tick));
     }
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {
-        match output_position(tempo.position(), &timeline) {
+        match output_position(tempo.position(), &timing) {
             Ok((measure, tick)) => {
                 let id = format!("{:02}", index + 1);
                 bpm_definitions.push(format!("#BPM{id}: {}\n", tempo.bpm()));
@@ -131,7 +136,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
         }
     }
 
-    let mut channel_index = 0;
+    let mut long_note_channels = vec![Vec::<(Position, Position)>::new(); 36];
     for (note_index, note) in chart.notes().iter().enumerate() {
         if matches!(
             note.kind(),
@@ -143,7 +148,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
             report_loss("SUS", "AIR notation");
             continue;
         }
-        let channel = match channel(channel_index) {
+        let channel = match note_channel(note, &mut long_note_channels) {
             Ok(channel) => channel,
             Err(error) if is_loss(&error) => {
                 report_loss("SUS", error);
@@ -155,7 +160,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
         let result = (|| {
             match note.kind() {
                 NoteKind::Tap(kind) => {
-                    let (measure, tick) = output_position(note.position(), &timeline)?;
+                    let (measure, tick) = output_position(note.position(), &timing)?;
                     let token = match kind {
                         TapKind::Tap => '1',
                         TapKind::XTap => '2',
@@ -191,7 +196,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                     }
                 }
                 NoteKind::ExTap { .. } => {
-                    let (measure, tick) = output_position(note.position(), &timeline)?;
+                    let (measure, tick) = output_position(note.position(), &timing)?;
                     records.push(Record {
                         measure,
                         tick,
@@ -209,7 +214,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                         start,
                         width,
                         channel,
-                        &timeline,
+                        &timing,
                     )?,
                     Lane::Side(button) => add_side_hold_records(
                         &mut records,
@@ -217,7 +222,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                         *end,
                         button,
                         channel,
-                        &timeline,
+                        &timing,
                     )?,
                 },
                 NoteKind::ExHold { end, .. } => match note.lane() {
@@ -228,7 +233,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                         start,
                         width,
                         channel,
-                        &timeline,
+                        &timing,
                     )?,
                     Lane::Side(button) => add_side_hold_records(
                         &mut records,
@@ -236,14 +241,14 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                         *end,
                         button,
                         channel,
-                        &timeline,
+                        &timing,
                     )?,
                 },
                 NoteKind::ExSlide { points, .. } => {
-                    add_slide_records(&mut records, points, channel, &timeline)?
+                    add_slide_records(&mut records, points, channel, &timing)?
                 }
                 NoteKind::Slide { points } => {
-                    add_slide_records(&mut records, points, channel, &timeline)?;
+                    add_slide_records(&mut records, points, channel, &timing)?;
                 }
                 NoteKind::Mine => {
                     return Err(SusError::UnsupportedNote {
@@ -283,13 +288,21 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
             }
             Err(error) => return Err(error),
         }
-        if records.len() > record_start {
-            channel_index += 1;
-        }
     }
 
-    records.sort_by_key(|record| (record.measure, record.tick, record.key.clone()));
-    let mut output = String::from("#REQUEST \"ticks_per_beat 384\"\n");
+    records.sort_by_key(|record| {
+        (
+            record.measure,
+            record.tick,
+            record.key.chars().last().unwrap_or_default(),
+            record_kind_order(record),
+            record.key.clone(),
+        )
+    });
+    let header_ticks = ticks_per_beat
+        .checked_mul(4)
+        .ok_or(SusError::UnrepresentablePosition)?;
+    let mut output = format!("#REQUEST \"ticks_per_beat {header_ticks}\"\n");
     if let Some(enabled) = chart.priority_enabled() {
         output.push_str(&format!(
             "#REQUEST \"enable_priority {}\"\n",
@@ -320,7 +333,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
     let mut current_attributes = NoteAttributes::default();
     let mut attribute_index = 0u32;
     for record in records {
-        let text = match format_record(&record, &timeline) {
+        let text = match format_record(&record, &timing) {
             Ok(text) => text,
             Err(error) if is_loss(&error) => {
                 report_loss("SUS", error);
@@ -609,6 +622,103 @@ fn output_timeline(chart: &Chart) -> MeasureTimeline {
     timeline
 }
 
+fn xlair_ticks_per_beat(chart: &Chart, timeline: &MeasureTimeline) -> Result<u64, SusError> {
+    let mut ticks = 96;
+    for &(_, length) in chart.measure_lengths() {
+        ticks = lcm(ticks, length.denominator()).ok_or(SusError::UnrepresentablePosition)?;
+    }
+    let mut add_position = |position: Position| -> Result<(), SusError> {
+        let mut start = Position::new(0, 1).expect("valid position");
+        let mut measure = 0;
+        loop {
+            let length = measure_length(chart, measure);
+            let end = start
+                .checked_add(length)
+                .map_err(|_| SusError::UnrepresentablePosition)?;
+            if position < end {
+                let offset = Position::new(
+                    position
+                        .numerator()
+                        .checked_mul(start.denominator())
+                        .and_then(|left| {
+                            start
+                                .numerator()
+                                .checked_mul(position.denominator())
+                                .and_then(|right| left.checked_sub(right))
+                        })
+                        .ok_or(SusError::UnrepresentablePosition)?,
+                    position
+                        .denominator()
+                        .checked_mul(start.denominator())
+                        .ok_or(SusError::UnrepresentablePosition)?,
+                )
+                .map_err(|_| SusError::UnrepresentablePosition)?;
+                let ratio = Position::new(
+                    offset
+                        .numerator()
+                        .checked_mul(length.denominator())
+                        .ok_or(SusError::UnrepresentablePosition)?,
+                    offset
+                        .denominator()
+                        .checked_mul(length.numerator())
+                        .ok_or(SusError::UnrepresentablePosition)?,
+                )
+                .map_err(|_| SusError::UnrepresentablePosition)?;
+                let required = ratio.denominator() / gcd(ratio.denominator(), 4);
+                ticks = lcm(ticks, required).ok_or(SusError::UnrepresentablePosition)?;
+                return Ok(());
+            }
+            start = end;
+            measure = measure
+                .checked_add(1)
+                .ok_or(SusError::UnrepresentablePosition)?;
+        }
+    };
+
+    for tempo in chart.tempo_changes() {
+        add_position(tempo.position())?;
+    }
+    for change in chart.scroll_speed_changes() {
+        add_position(change.position())?;
+        if let Some(duration) = change.duration() {
+            add_position(duration)?;
+        }
+    }
+    for note in chart.notes() {
+        add_position(note.position())?;
+        match note.kind() {
+            NoteKind::Hold { end }
+            | NoteKind::ExHold { end, .. }
+            | NoteKind::AirHold { end, .. } => add_position(*end)?,
+            NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => {
+                for point in points {
+                    add_position(point.position())?;
+                }
+            }
+            NoteKind::AirSlide { points, .. } | NoteKind::AirCrush { points, .. } => {
+                for point in points {
+                    add_position(point.position())?;
+                }
+            }
+            NoteKind::Tap(_) | NoteKind::ExTap { .. } | NoteKind::Mine | NoteKind::Air { .. } => {}
+        }
+    }
+    timeline
+        .ticks(0, ticks)
+        .map_err(|_| SusError::UnrepresentablePosition)?;
+    Ok(ticks)
+}
+
+fn measure_length(chart: &Chart, measure: u32) -> Position {
+    chart
+        .measure_lengths()
+        .iter()
+        .rev()
+        .find(|(changed_measure, _)| *changed_measure <= measure)
+        .map(|(_, length)| *length)
+        .unwrap_or_else(|| Position::new(4, 1).expect("valid position"))
+}
+
 fn format_position(position: Position) -> Result<String, SusError> {
     let integer = position.numerator() / position.denominator();
     let mut remainder = position.numerator() % position.denominator();
@@ -877,6 +987,11 @@ struct Record {
     attributes: NoteAttributes,
 }
 
+struct XlairTiming<'a> {
+    timeline: &'a MeasureTimeline,
+    ticks_per_beat: u64,
+}
+
 fn add_hold_records(
     records: &mut Vec<Record>,
     start: Position,
@@ -884,10 +999,10 @@ fn add_hold_records(
     lane: u8,
     width: u8,
     channel: char,
-    timeline: &MeasureTimeline,
+    timing: &XlairTiming<'_>,
 ) -> Result<(), SusError> {
-    let (start_measure, start_tick) = output_position(start, timeline)?;
-    let (end_measure, end_tick) = output_position(end, timeline)?;
+    let (start_measure, start_tick) = output_position(start, timing)?;
+    let (end_measure, end_tick) = output_position(end, timing)?;
     records.push(Record {
         measure: start_measure,
         tick: start_tick,
@@ -913,10 +1028,10 @@ fn add_side_hold_records(
     end: Position,
     button: SideButton,
     channel: char,
-    timeline: &MeasureTimeline,
+    timing: &XlairTiming<'_>,
 ) -> Result<(), SusError> {
-    let (start_measure, start_tick) = output_position(start, timeline)?;
-    let (end_measure, end_tick) = output_position(end, timeline)?;
+    let (start_measure, start_tick) = output_position(start, timing)?;
+    let (end_measure, end_tick) = output_position(end, timing)?;
     let lane = side_lane(button);
     records.push(Record {
         measure: start_measure,
@@ -941,11 +1056,11 @@ fn add_slide_records(
     records: &mut Vec<Record>,
     points: &[SlidePoint],
     channel: char,
-    timeline: &MeasureTimeline,
+    timing: &XlairTiming<'_>,
 ) -> Result<(), SusError> {
     for (index, point) in points.iter().enumerate() {
         let lane = central_lane(point.lane(), "slide")?;
-        let (measure, tick) = output_position(point.position(), timeline)?;
+        let (measure, tick) = output_position(point.position(), timing)?;
         let kind = if index == 0 {
             '1'
         } else if index + 1 == points.len() {
@@ -969,11 +1084,12 @@ fn add_slide_records(
     Ok(())
 }
 
-fn format_record(record: &Record, timeline: &MeasureTimeline) -> Result<String, SusError> {
+fn format_record(record: &Record, timing: &XlairTiming<'_>) -> Result<String, SusError> {
     let padding = usize::try_from(record.tick).map_err(|_| SusError::UnrepresentablePosition)?;
     let slots = usize::try_from(
-        timeline
-            .ticks(record.measure, 96)
+        timing
+            .timeline
+            .ticks(record.measure, timing.ticks_per_beat)
             .map_err(|_| SusError::UnrepresentablePosition)?,
     )
     .map_err(|_| SusError::UnrepresentablePosition)?;
@@ -990,9 +1106,10 @@ fn format_record(record: &Record, timeline: &MeasureTimeline) -> Result<String, 
     ))
 }
 
-fn output_position(position: Position, timeline: &MeasureTimeline) -> Result<(u32, u64), SusError> {
-    timeline
-        .locate(position, 96)
+fn output_position(position: Position, timing: &XlairTiming<'_>) -> Result<(u32, u64), SusError> {
+    timing
+        .timeline
+        .locate(position, timing.ticks_per_beat)
         .map_err(|_| SusError::UnrepresentablePosition)
 }
 
@@ -1003,6 +1120,44 @@ fn channel(index: usize) -> Result<char, SusError> {
         .copied()
         .map(char::from)
         .ok_or(SusError::UnrepresentablePosition)
+}
+
+fn note_channel(
+    note: &Note,
+    long_note_channels: &mut [Vec<(Position, Position)>],
+) -> Result<char, SusError> {
+    let is_long = matches!(
+        note.kind(),
+        NoteKind::Hold { .. }
+            | NoteKind::ExHold { .. }
+            | NoteKind::Slide { .. }
+            | NoteKind::ExSlide { .. }
+    );
+    if !is_long {
+        return Ok('0');
+    }
+
+    let start = note.position();
+    let end = note_end_position(note);
+    let channel_index = long_note_channels
+        .iter()
+        .position(|intervals| {
+            intervals
+                .iter()
+                .all(|&(other_start, other_end)| end < other_start || other_end < start)
+        })
+        .ok_or(SusError::UnrepresentablePosition)?;
+    long_note_channels[channel_index].push((start, end));
+    channel(channel_index)
+}
+
+fn record_kind_order(record: &Record) -> u8 {
+    match record.token.as_bytes().first().copied() {
+        Some(b'1') => 0,
+        Some(b'3'..=b'5') => 1,
+        Some(b'2') => 2,
+        _ => 0,
+    }
 }
 
 fn is_loss(error: &SusError) -> bool {
@@ -2342,6 +2497,26 @@ mod tests {
     }
 
     #[test]
+    fn increases_xlair_resolution_for_fine_note_positions() {
+        let position = Position::new(479, 120).expect("valid position");
+        let mut chart = Chart::new();
+        chart.add_note(
+            Note::new(
+                position,
+                Lane::slider(0, 4).expect("valid lane"),
+                NoteKind::Tap(TapKind::Tap),
+            )
+            .expect("valid note"),
+        );
+
+        let written = write_with_mode(&chart, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
+        let reparsed = parse_with_mode(&written, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
+
+        assert!(written.starts_with("#REQUEST \"ticks_per_beat 1920\""));
+        assert_eq!(reparsed.notes(), chart.notes());
+    }
+
+    #[test]
     fn preserves_note_attributes_when_writing_xlair_sus() {
         let source = "#ATR01: \"rh: 1.5, h: 2.0, pr: 100\"\n#ATTRIBUTE 01\n#00010: 14";
         let chart = parse(source).expect("valid SUS attributes");
@@ -2809,5 +2984,66 @@ mod tests {
             super::parse_with_mode(&sus, chart::ChartMode::Xlair).expect("valid XLAIR output");
         assert_eq!(parsed.notes().len(), 1);
         assert_eq!(parsed.notes()[0].kind(), &NoteKind::Tap(TapKind::Tap));
+    }
+
+    #[test]
+    fn preserves_slide_points_that_share_a_position() {
+        let start = Position::new(0, 1).unwrap();
+        let junction = Position::new(1, 1).unwrap();
+        let mut chart = Chart::new();
+        chart.add_note(
+            Note::new(
+                start,
+                Lane::slider(0, 4).unwrap(),
+                NoteKind::Slide {
+                    points: vec![
+                        SlidePoint::new(start, Lane::slider(0, 4).unwrap()),
+                        SlidePoint::new(junction, Lane::slider(4, 4).unwrap())
+                            .with_kind(SlidePointKind::Control),
+                        SlidePoint::new(junction, Lane::slider(8, 4).unwrap()),
+                    ],
+                },
+            )
+            .unwrap(),
+        );
+
+        let sus = write_with_mode(&chart, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
+        let reparsed = parse_with_mode(&sus, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
+
+        assert_eq!(reparsed.notes(), chart.notes());
+    }
+
+    #[test]
+    fn reuses_xlair_channels_for_non_overlapping_long_notes() {
+        let mut chart = Chart::new();
+        for index in 0..40 {
+            let start = Position::new(index * 2, 1).unwrap();
+            let end = Position::new(index * 2 + 1, 1).unwrap();
+            chart.add_note(
+                Note::new(
+                    start,
+                    Lane::slider(0, 4).unwrap(),
+                    NoteKind::Slide {
+                        points: vec![
+                            SlidePoint::new(start, Lane::slider(0, 4).unwrap()),
+                            SlidePoint::new(end, Lane::slider(0, 4).unwrap()),
+                        ],
+                    },
+                )
+                .unwrap(),
+            );
+        }
+
+        let sus = write_with_mode(&chart, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
+        let reparsed = parse_with_mode(&sus, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
+
+        assert_eq!(reparsed.notes().len(), chart.notes().len());
+        assert!(
+            reparsed
+                .notes()
+                .iter()
+                .zip(chart.notes())
+                .all(|(reparsed, original)| reparsed.position() == original.position())
+        );
     }
 }
