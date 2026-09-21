@@ -1332,6 +1332,7 @@ impl Parser {
                 self.parse_til_definition(line, header, &data)?;
             } else if header.len() == 5
                 && header.chars().all(|c| c.is_ascii_hexdigit())
+                && !header.ends_with("08")
                 && (data.len() >= 6 || (data.len() == 4 && &data[..2] == "08"))
                 && u8::from_str_radix(&data[..2], 16).is_ok_and(|code| {
                     matches!(
@@ -2536,6 +2537,16 @@ mod tests {
         assert_eq!(chart.notes().len(), 1);
         assert_eq!(chart.notes()[0].lane(), Lane::Side(SideButton::LeftUpper));
         assert!(matches!(chart.notes()[0].kind(), NoteKind::Hold { .. }));
+    }
+
+    #[test]
+    fn does_not_parse_long_bpm_change_data_as_a_note() {
+        let source = "#BPM01: 120\n#00008: 010000000000\n";
+        let chart = super::parse_with_mode(source, chart::ChartMode::Xlair)
+            .expect("valid XLAIR BPM change");
+
+        assert_eq!(chart.tempo_changes().len(), 1);
+        assert!(chart.notes().is_empty());
     }
 
     #[test]
