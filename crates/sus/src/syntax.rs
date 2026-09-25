@@ -30,12 +30,7 @@ pub(super) fn note_end_position(note: &Note) -> Position {
 }
 
 pub(super) fn side_lane(button: SideButton) -> u8 {
-    match button {
-        SideButton::LeftUpper => 0,
-        SideButton::LeftLower => 2,
-        SideButton::RightLower => 12,
-        SideButton::RightUpper => 14,
-    }
+    button.xlair_lane_start()
 }
 
 pub(super) fn side_direction(button: SideButton) -> char {

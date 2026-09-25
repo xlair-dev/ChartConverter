@@ -53,6 +53,8 @@ pub(super) struct Parser {
     current_attributes: Option<NoteAttributes>,
     chart: Chart,
     pending_standard_air: Vec<PendingStandardAir>,
+    /// Geometry retained so later central taps are suppressed regardless of record order.
+    side_tap_regions: Vec<(Position, Lane)>,
 }
 
 impl Parser {
@@ -71,6 +73,7 @@ impl Parser {
             current_attributes: None,
             chart: Chart::new(),
             pending_standard_air: Vec::new(),
+            side_tap_regions: Vec::new(),
         }
     }
 
@@ -394,6 +397,10 @@ impl Parser {
                 )
                 .map_err(|source| SusError::Chart { line, source })?,
             ),
+            0x10 if self.mode == ChartMode::Xlair => {
+                report_loss("SUS", "damage note in XLAIR mode");
+                Ok(())
+            }
             0x10 => self.add_note(
                 line,
                 Note::new(position, lane, NoteKind::Mine)
@@ -859,6 +866,10 @@ impl Parser {
             if token[0] == b'0' {
                 continue;
             }
+            if self.mode == ChartMode::Xlair && matches!(token[0], b'4'..=b'6') {
+                report_loss("SUS", "unsupported tap variant in XLAIR mode");
+                continue;
+            }
             let kind = match token[0] {
                 b'1' => TapKind::Tap,
                 b'2' => TapKind::XTap,
@@ -912,6 +923,10 @@ impl Parser {
                 )?;
                 continue;
             }
+            if matches!(token[0], b'1' | b'2') {
+                report_loss("SUS", "non-side AIR direction in XLAIR mode");
+                continue;
+            }
             let button = match token[0] {
                 b'3' => SideButton::LeftUpper,
                 b'4' => SideButton::RightUpper,
@@ -919,12 +934,34 @@ impl Parser {
                 b'6' => SideButton::RightLower,
                 _ => return Err(invalid_token(line, token)),
             };
-            let lane = Lane::Side(button);
-            self.add_note(
-                line,
-                Note::new(position, lane, NoteKind::Tap(TapKind::Tap))
-                    .map_err(|source| SusError::Chart { line, source })?,
-            )?;
+            let width = base36_byte(token[1], line)?;
+            let source_lane =
+                Lane::slider(lane, width).map_err(|source| SusError::Chart { line, source })?;
+            self.side_tap_regions.push((position, source_lane));
+            let side_note = Note::new(position, Lane::Side(button), NoteKind::Tap(TapKind::Tap))
+                .map_err(|source| SusError::Chart { line, source })?
+                .with_attributes(self.current_attributes.unwrap_or_default());
+            let overlapping_tap =
+                self.chart
+                    .notes()
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, note)| {
+                        (note.position() == position
+                            && source_lane.overlaps(note.lane())
+                            && matches!(note.kind(), NoteKind::Tap(_)))
+                        .then_some(NoteId::new(index as u32))
+                    });
+            if let Some(note_id) = overlapping_tap {
+                self.chart
+                    .replace_note(note_id, side_note)
+                    .map_err(|source| SusError::Chart { line, source })?;
+                self.chart
+                    .set_note_speed_group(note_id, self.current_speed_group)
+                    .map_err(|source| SusError::Chart { line, source })?;
+            } else {
+                self.add_note(line, side_note)?;
+            }
         }
         Ok(())
     }
@@ -1118,6 +1155,15 @@ impl Parser {
     }
 
     fn add_note(&mut self, line: usize, note: Note) -> Result<(), SusError> {
+        if self.mode == ChartMode::Xlair
+            && matches!(note.kind(), NoteKind::Tap(_))
+            && self
+                .side_tap_regions
+                .iter()
+                .any(|(position, lane)| *position == note.position() && lane.overlaps(note.lane()))
+        {
+            return Ok(());
+        }
         let note_id = self
             .chart
             .add_note(note.with_attributes(self.current_attributes.unwrap_or_default()));
@@ -1246,13 +1292,7 @@ fn base36_byte(value: u8, line: usize) -> Result<u8, SusError> {
 }
 
 fn side_button(lane: u8) -> Option<SideButton> {
-    match lane {
-        0 | 1 => Some(SideButton::LeftUpper),
-        2 | 3 => Some(SideButton::LeftLower),
-        12 | 13 => Some(SideButton::RightLower),
-        14 | 15 => Some(SideButton::RightUpper),
-        _ => None,
-    }
+    SideButton::from_xlair_lane_start(lane)
 }
 
 fn parse_position(value: &str) -> Result<Position, ()> {

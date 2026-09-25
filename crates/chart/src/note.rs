@@ -35,6 +35,22 @@ mod tests {
     }
 
     #[test]
+    fn lane_overlap_uses_slider_intervals_only() {
+        let left = Lane::slider(2, 4).unwrap();
+        assert!(left.overlaps(Lane::slider(5, 2).unwrap()));
+        assert!(!left.overlaps(Lane::slider(6, 2).unwrap()));
+        assert!(!left.overlaps(Lane::Side(SideButton::LeftLower)));
+        assert_eq!(
+            SideButton::from_xlair_lane_start(12),
+            Some(SideButton::RightUpper)
+        );
+        assert_eq!(
+            SideButton::from_xlair_lane_start(14),
+            Some(SideButton::RightLower)
+        );
+    }
+
+    #[test]
     fn air_notes_keep_their_parent_reference() {
         let position = Position::new(1, 1).expect("valid position");
 
@@ -234,6 +250,26 @@ impl Lane {
         }
         Ok(Self::Slider { start, width })
     }
+
+    /// Returns whether two slider lanes share at least one lane.
+    pub fn overlaps(self, other: Self) -> bool {
+        match (self, other) {
+            (
+                Self::Slider {
+                    start: left_start,
+                    width: left_width,
+                },
+                Self::Slider {
+                    start: right_start,
+                    width: right_width,
+                },
+            ) => {
+                u16::from(left_start) < u16::from(right_start) + u16::from(right_width)
+                    && u16::from(right_start) < u16::from(left_start) + u16::from(left_width)
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,6 +278,29 @@ pub enum SideButton {
     LeftLower,
     RightLower,
     RightUpper,
+}
+
+impl SideButton {
+    /// Maps a zero-based XLAIR lane start to its side button, if the lane is assigned to one.
+    pub fn from_xlair_lane_start(start: u8) -> Option<Self> {
+        match start {
+            0 | 1 => Some(Self::LeftUpper),
+            2 | 3 => Some(Self::LeftLower),
+            12 | 13 => Some(Self::RightUpper),
+            14 | 15 => Some(Self::RightLower),
+            _ => None,
+        }
+    }
+
+    /// Returns the first zero-based XLAIR lane assigned to this side button.
+    pub fn xlair_lane_start(self) -> u8 {
+        match self {
+            Self::LeftUpper => 0,
+            Self::LeftLower => 2,
+            Self::RightUpper => 12,
+            Self::RightLower => 14,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
