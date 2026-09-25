@@ -105,6 +105,30 @@ fn parses_xlair_side_taps_and_relayed_holds() {
 }
 
 #[test]
+fn xlair_side_taps_replace_overlapping_central_taps_in_either_record_order() {
+    for source in ["#00110: 11\n#00150: 31", "#00150: 31\n#00110: 11"] {
+        let chart =
+            super::parse_with_mode(source, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
+        assert_eq!(chart.notes().len(), 1);
+        assert_eq!(chart.notes()[0].lane(), Lane::Side(SideButton::LeftUpper));
+        assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::Tap));
+    }
+}
+
+#[test]
+fn xlair_side_taps_keep_non_overlapping_central_taps() {
+    let chart = super::parse_with_mode(
+        "#00110: 11\n#00112: 11\n#00150: 31",
+        chart::ChartMode::Xlair,
+    )
+    .expect("valid XLAIR SUS");
+
+    assert_eq!(chart.notes().len(), 2);
+    assert_eq!(chart.notes()[0].lane(), Lane::Side(SideButton::LeftUpper));
+    assert_eq!(chart.notes()[1].lane(), Lane::slider(2, 1).unwrap());
+}
+
+#[test]
 fn ignores_standard_metadata() {
     let source = r#"
 #TITLE "title"

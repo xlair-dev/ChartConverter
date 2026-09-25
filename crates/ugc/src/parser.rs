@@ -1,8 +1,8 @@
 use chart::{
     AirColor, AirCrushColor, AirCrushInterval, AirCrushPoint, AirDirection, AirPoint,
     AirProperties, Chart, ChartError, ChartMode, ExDirection, Lane, MeasureTimeline, Note, NoteId,
-    NoteKind, Position, ScrollScope, ScrollSpeedChange, SlidePoint, SlidePointKind, TapKind,
-    TempoChange, report_loss,
+    NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton, SlidePoint, SlidePointKind,
+    TapKind, TempoChange, report_loss,
 };
 
 use crate::{UgcError, syntax::is_xlair_side_air_direction};
@@ -398,10 +398,9 @@ impl Parser {
         Ok((0, Some(note)))
     }
 
-    /// XLAIR reuses UGC's diagonal AIR records for side-device actions, so
-    /// those records must remain in the shared chart instead of being discarded.
+    /// XLAIR reuses UGC's diagonal AIR records to encode side-button taps.
     fn parse_air(
-        &self,
+        &mut self,
         line: usize,
         position: Position,
         lane_code: &str,
@@ -416,6 +415,35 @@ impl Parser {
         if self.mode == ChartMode::Xlair && !is_xlair_side_air_direction(direction) {
             report_loss("UGC", "non-side AIR notation in XLAIR mode");
             return Ok((0, None));
+        }
+        if self.mode == ChartMode::Xlair {
+            let button = match direction {
+                AirDirection::UpperLeft => SideButton::LeftUpper,
+                AirDirection::UpperRight => SideButton::RightUpper,
+                AirDirection::LowerLeft => SideButton::LeftLower,
+                AirDirection::LowerRight => SideButton::RightLower,
+                _ => unreachable!(),
+            };
+            let side_note = Note::new(position, Lane::Side(button), NoteKind::Tap(TapKind::Tap))
+                .map_err(|source| UgcError::Chart { line, source })?;
+            let overlapping_tap =
+                self.chart
+                    .notes()
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, note)| {
+                        (note.position() == position
+                            && lane.overlaps(note.lane())
+                            && matches!(note.kind(), NoteKind::Tap(TapKind::Tap)))
+                        .then_some((NoteId::new(index as u32), note.attributes()))
+                    });
+            if let Some((note_id, attributes)) = overlapping_tap {
+                self.chart
+                    .replace_note(note_id, side_note.with_attributes(attributes))
+                    .map_err(|source| UgcError::Chart { line, source })?;
+                return Ok((0, None));
+            }
+            return Ok((0, Some(side_note)));
         }
         let properties =
             parse_air_properties(line, Some(direction), attributes.get(2..).unwrap_or(""))?;
@@ -728,9 +756,19 @@ impl Parser {
                     record: "variable hold lane".to_owned(),
                 });
             }
+            let hold_lane = if self.mode == ChartMode::Xlair {
+                match first_lane {
+                    Lane::Slider { start, .. } => SideButton::from_xlair_lane_start(start)
+                        .map(Lane::Side)
+                        .unwrap_or(first_lane),
+                    Lane::Side(_) => first_lane,
+                }
+            } else {
+                first_lane
+            };
             Note::new(
                 position,
-                first_lane,
+                hold_lane,
                 NoteKind::Hold {
                     end: points.last().unwrap().position(),
                 },

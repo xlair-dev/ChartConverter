@@ -492,29 +492,58 @@ fn applies_xlair_mode_to_ugc_extended_taps() {
 }
 
 #[test]
-fn preserves_xlair_side_air_notes() {
+fn maps_xlair_diagonal_air_to_side_button_taps() {
+    for (direction, button) in [
+        ("UL", chart::SideButton::LeftUpper),
+        ("UR", chart::SideButton::RightUpper),
+        ("DL", chart::SideButton::LeftLower),
+        ("DR", chart::SideButton::RightLower),
+    ] {
+        let source =
+            format!("@TICKS\t480\n@BEAT\t0\t4\t4\n@ENDHEAD\n#0'0:t04\n#0'0:a04{direction}N\n");
+        let chart = super::parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(chart.notes().len(), 1);
+        assert_eq!(chart.notes()[0].lane(), Lane::Side(button));
+        assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::Tap));
+    }
+}
+
+#[test]
+fn keeps_non_overlapping_xlair_side_air_taps_alongside_their_parent_taps() {
     let source = concat!(
         "@TICKS\t480\n",
         "@BEAT\t0\t4\t4\n",
         "@ENDHEAD\n",
         "#0'0:t04\n",
-        "#0'0:a04ULN\n",
+        "#0'120:a04ULN\n",
     );
     let chart = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
-    assert_eq!(chart.notes().len(), 2);
-    assert!(matches!(
-        chart.notes()[0].kind(),
-        NoteKind::Tap(TapKind::Tap)
-    ));
-    assert!(matches!(
-        chart.notes()[1].kind(),
-        NoteKind::Air { properties, .. }
-            if properties.direction() == Some(chart::AirDirection::UpperLeft)
-    ));
 
-    let written = super::write_with_mode(&chart, chart::ChartMode::Xlair).unwrap();
-    let reparsed = super::parse_with_mode(&written, chart::ChartMode::Xlair).unwrap();
-    assert_eq!(reparsed.notes(), chart.notes());
+    assert_eq!(chart.notes().len(), 2);
+    assert_eq!(chart.notes()[0].lane(), Lane::slider(0, 4).unwrap());
+    assert_eq!(
+        chart.notes()[1].lane(),
+        Lane::Side(chart::SideButton::LeftUpper)
+    );
+}
+
+#[test]
+fn parses_xlair_side_holds_as_side_button_notes() {
+    for (lane, button) in [
+        ("02", chart::SideButton::LeftUpper),
+        ("22", chart::SideButton::LeftLower),
+        ("c2", chart::SideButton::RightLower),
+        ("e2", chart::SideButton::RightUpper),
+    ] {
+        let source = format!("@TICKS\t480\n@BEAT\t0\t4\t4\n@ENDHEAD\n#0'0:h{lane}\n#480>s{lane}\n");
+        let chart = super::parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(chart.notes().len(), 1);
+        assert_eq!(chart.notes()[0].lane(), Lane::Side(button));
+        assert!(matches!(chart.notes()[0].kind(), NoteKind::Hold { .. }));
+
+        let normal = super::parse_with_mode(&source, chart::ChartMode::Normal).unwrap();
+        assert!(matches!(normal.notes()[0].lane(), Lane::Slider { .. }));
+    }
 }
 
 #[test]
