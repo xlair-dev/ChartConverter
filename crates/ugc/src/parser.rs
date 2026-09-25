@@ -349,6 +349,10 @@ impl Parser {
                         direction: parse_flick_direction(line, &code[3..])?,
                     },
                     'd' => {
+                        if self.mode == ChartMode::Xlair {
+                            report_loss("UGC", "damage note in XLAIR mode");
+                            return Ok((0, None));
+                        }
                         let note = Note::new(position, lane, NoteKind::Mine)
                             .map_err(|source| UgcError::Chart { line, source })?;
                         return Ok((0, Some(note)));
@@ -434,7 +438,7 @@ impl Parser {
                     .find_map(|(index, note)| {
                         (note.position() == position
                             && lane.overlaps(note.lane())
-                            && matches!(note.kind(), NoteKind::Tap(TapKind::Tap)))
+                            && matches!(note.kind(), NoteKind::Tap(_)))
                         .then_some(NoteId::new(index as u32))
                     });
             if let Some(note_id) = overlapping_tap {

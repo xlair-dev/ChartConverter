@@ -397,6 +397,10 @@ impl Parser {
                 )
                 .map_err(|source| SusError::Chart { line, source })?,
             ),
+            0x10 if self.mode == ChartMode::Xlair => {
+                report_loss("SUS", "damage note in XLAIR mode");
+                Ok(())
+            }
             0x10 => self.add_note(
                 line,
                 Note::new(position, lane, NoteKind::Mine)
@@ -862,6 +866,10 @@ impl Parser {
             if token[0] == b'0' {
                 continue;
             }
+            if self.mode == ChartMode::Xlair && matches!(token[0], b'4'..=b'6') {
+                report_loss("SUS", "unsupported tap variant in XLAIR mode");
+                continue;
+            }
             let kind = match token[0] {
                 b'1' => TapKind::Tap,
                 b'2' => TapKind::XTap,
@@ -937,7 +945,7 @@ impl Parser {
                     .find_map(|(index, note)| {
                         (note.position() == position
                             && source_lane.overlaps(note.lane())
-                            && matches!(note.kind(), NoteKind::Tap(TapKind::Tap)))
+                            && matches!(note.kind(), NoteKind::Tap(_)))
                         .then_some(NoteId::new(index as u32))
                     });
             if let Some(note_id) = overlapping_tap {
@@ -1144,7 +1152,7 @@ impl Parser {
 
     fn add_note(&mut self, line: usize, note: Note) -> Result<(), SusError> {
         if self.mode == ChartMode::Xlair
-            && matches!(note.kind(), NoteKind::Tap(TapKind::Tap))
+            && matches!(note.kind(), NoteKind::Tap(_))
             && self
                 .side_tap_regions
                 .iter()
