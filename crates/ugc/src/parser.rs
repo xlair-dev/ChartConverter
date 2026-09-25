@@ -435,11 +435,14 @@ impl Parser {
                         (note.position() == position
                             && lane.overlaps(note.lane())
                             && matches!(note.kind(), NoteKind::Tap(TapKind::Tap)))
-                        .then_some((NoteId::new(index as u32), note.attributes()))
+                        .then_some(NoteId::new(index as u32))
                     });
-            if let Some((note_id, attributes)) = overlapping_tap {
+            if let Some(note_id) = overlapping_tap {
                 self.chart
-                    .replace_note(note_id, side_note.with_attributes(attributes))
+                    .replace_note(note_id, side_note)
+                    .map_err(|source| UgcError::Chart { line, source })?;
+                self.chart
+                    .set_note_speed_group(note_id, self.current_speed_group)
                     .map_err(|source| UgcError::Chart { line, source })?;
                 return Ok((0, None));
             }

@@ -339,4 +339,41 @@ mod tests {
         assert_eq!(chart.notes().len(), 2);
         assert_eq!(chart.notes()[1].kind(), &NoteKind::Tap(TapKind::XTap));
     }
+
+    #[test]
+    fn converts_xlair_sus_side_notes_to_ugc_and_back() {
+        let source = "#00150: 31\n#0012cA: 14\n#0022cA: 24";
+        let output = super::convert_with_modes(
+            Format::Sus,
+            ChartMode::Xlair,
+            Format::Ugc,
+            ChartMode::Xlair,
+            source,
+        )
+        .expect("XLAIR side notes are representable in UGC");
+        let chart = super::parse_with_mode(Format::Ugc, ChartMode::Xlair, &output)
+            .expect("valid XLAIR UGC output");
+
+        assert_eq!(chart.notes().len(), 2);
+        assert_eq!(
+            chart.notes()[0].lane(),
+            Lane::Side(chart::SideButton::LeftUpper)
+        );
+        assert_eq!(
+            chart.notes()[1].lane(),
+            Lane::Side(chart::SideButton::RightUpper)
+        );
+
+        let returned = super::convert_with_modes(
+            Format::Ugc,
+            ChartMode::Xlair,
+            Format::Sus,
+            ChartMode::Xlair,
+            &output,
+        )
+        .expect("XLAIR side notes are representable in SUS");
+        let returned_chart = super::parse_with_mode(Format::Sus, ChartMode::Xlair, &returned)
+            .expect("valid XLAIR SUS output");
+        assert_eq!(returned_chart.notes(), chart.notes());
+    }
 }

@@ -42,6 +42,10 @@ mod tests {
         assert!(!left.overlaps(Lane::Side(SideButton::LeftLower)));
         assert_eq!(
             SideButton::from_xlair_lane_start(12),
+            Some(SideButton::RightUpper)
+        );
+        assert_eq!(
+            SideButton::from_xlair_lane_start(14),
             Some(SideButton::RightLower)
         );
     }
@@ -282,9 +286,19 @@ impl SideButton {
         match start {
             0 | 1 => Some(Self::LeftUpper),
             2 | 3 => Some(Self::LeftLower),
-            12 | 13 => Some(Self::RightLower),
-            14 | 15 => Some(Self::RightUpper),
+            12 | 13 => Some(Self::RightUpper),
+            14 | 15 => Some(Self::RightLower),
             _ => None,
+        }
+    }
+
+    /// Returns the first zero-based XLAIR lane assigned to this side button.
+    pub fn xlair_lane_start(self) -> u8 {
+        match self {
+            Self::LeftUpper => 0,
+            Self::LeftLower => 2,
+            Self::RightUpper => 12,
+            Self::RightLower => 14,
         }
     }
 }

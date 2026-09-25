@@ -8,7 +8,7 @@ use chart::{
 
 use crate::{UgcError, syntax::is_xlair_side_air_direction};
 
-pub(super) fn write_with_mode(chart: &Chart, _mode: ChartMode) -> Result<String, UgcError> {
+pub(super) fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, UgcError> {
     if chart.priority_enabled().is_some() {
         report_loss("UGC", "SUS enable_priority request");
     }
@@ -66,7 +66,7 @@ pub(super) fn write_with_mode(chart: &Chart, _mode: ChartMode) -> Result<String,
     let mut note_records = Vec::new();
     for (index, note) in chart.notes().iter().enumerate() {
         let note_id = NoteId::new(index as u32);
-        match write_note(chart, note_id, note, _mode, &timeline) {
+        match write_note(chart, note_id, note, mode, &timeline) {
             Ok(mut record) => {
                 if let Some(group) = record.speed_group
                     && !speed_groups.contains(&group)
@@ -176,8 +176,18 @@ fn write_note(
             note: "AIR long notation in XLAIR mode".to_owned(),
         });
     }
+    if mode == ChartMode::Xlair
+        && let (Lane::Side(button), NoteKind::Tap(TapKind::Tap)) = (note.lane(), note.kind())
+    {
+        return write_xlair_side_tap(chart, note_id, note, button, mode, timeline);
+    }
     let (measure, tick) = output_position(note.position(), timeline)?;
-    let (lane, width) = central_lane(note.lane())?;
+    let (lane, width) = match (mode, note.lane(), note.kind()) {
+        (ChartMode::Xlair, Lane::Side(button), NoteKind::Hold { .. }) => {
+            (button.xlair_lane_start(), 2)
+        }
+        (_, lane, _) => central_lane(lane)?,
+    };
     let prefix = format!("#{measure}'{tick}:");
     let is_air = matches!(
         note.kind(),
@@ -242,6 +252,60 @@ fn write_note(
         order: note_id.value(),
         parent_order: parent.map_or(note_id.value(), NoteId::value),
         is_air,
+        speed_group,
+        text,
+    })
+}
+
+/// Encodes a side tap using a non-overlapping carrier tap and its diagonal AIR child.
+fn write_xlair_side_tap(
+    chart: &Chart,
+    note_id: NoteId,
+    note: &Note,
+    button: chart::SideButton,
+    mode: ChartMode,
+    timeline: &MeasureTimeline,
+) -> Result<OutputRecord, UgcError> {
+    let width = 1;
+    let lane = (0..16)
+        .find(|start| {
+            let candidate = Lane::slider(*start, width).expect("one-lane slider is valid");
+            !chart.notes().iter().any(|other| {
+                other.position() == note.position()
+                    && candidate.overlaps(other.lane())
+                    && matches!(other.kind(), NoteKind::Tap(_))
+            })
+        })
+        .ok_or_else(|| UgcError::UnsupportedNote {
+            note: "XLAIR side tap has no available UGC carrier lane".to_owned(),
+        })?;
+    let (measure, tick) = output_position(note.position(), timeline)?;
+    let prefix = format!("#{measure}'{tick}:");
+    let mut text = write_non_air_note(note, &prefix, lane, width, false, mode)?;
+    let direction = match button {
+        chart::SideButton::LeftUpper => "UL",
+        chart::SideButton::RightUpper => "UR",
+        chart::SideButton::LeftLower => "DL",
+        chart::SideButton::RightLower => "DR",
+    };
+    text.push_str(&format!(
+        "{prefix}a{}{}{}N\n",
+        encode_base36(lane),
+        encode_base36(width),
+        direction
+    ));
+    let speed_group = chart
+        .note_speed_group(note_id)
+        .map_err(|_| UgcError::InvalidValue {
+            line: 0,
+            value: "invalid note id".to_owned(),
+        })?;
+    Ok(OutputRecord {
+        measure,
+        tick,
+        order: note_id.value(),
+        parent_order: note_id.value(),
+        is_air: false,
         speed_group,
         text,
     })

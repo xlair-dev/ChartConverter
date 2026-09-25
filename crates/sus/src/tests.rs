@@ -105,6 +105,42 @@ fn parses_xlair_side_taps_and_relayed_holds() {
 }
 
 #[test]
+fn maps_each_xlair_directional_code_to_its_side_button() {
+    for (direction, button) in [
+        ('3', SideButton::LeftUpper),
+        ('4', SideButton::RightUpper),
+        ('5', SideButton::LeftLower),
+        ('6', SideButton::RightLower),
+    ] {
+        let source = format!("#00150: {direction}1");
+        let chart = super::parse_with_mode(&source, chart::ChartMode::Xlair)
+            .expect("valid XLAIR directional note");
+
+        assert_eq!(chart.notes().len(), 1);
+        assert_eq!(chart.notes()[0].lane(), Lane::Side(button));
+        assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::Tap));
+    }
+}
+
+#[test]
+fn maps_xlair_side_holds_to_the_buttons_defined_by_their_start_lanes() {
+    for (lane, button) in [
+        ('0', SideButton::LeftUpper),
+        ('2', SideButton::LeftLower),
+        ('c', SideButton::RightUpper),
+        ('e', SideButton::RightLower),
+    ] {
+        let source = format!("#0012{lane}A: 14\n#0022{lane}A: 24");
+        let chart = super::parse_with_mode(&source, chart::ChartMode::Xlair)
+            .expect("valid XLAIR side hold");
+
+        assert_eq!(chart.notes().len(), 1);
+        assert_eq!(chart.notes()[0].lane(), Lane::Side(button));
+        assert!(matches!(chart.notes()[0].kind(), NoteKind::Hold { .. }));
+    }
+}
+
+#[test]
 fn xlair_side_taps_replace_overlapping_central_taps_in_either_record_order() {
     for source in ["#00110: 11\n#00150: 31", "#00150: 31\n#00110: 11"] {
         let chart =
@@ -113,6 +149,21 @@ fn xlair_side_taps_replace_overlapping_central_taps_in_either_record_order() {
         assert_eq!(chart.notes()[0].lane(), Lane::Side(SideButton::LeftUpper));
         assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::Tap));
     }
+}
+
+#[test]
+fn xlair_side_tap_keeps_the_speed_group_of_its_own_record() {
+    let source = concat!(
+        "#TIL00: \"0'0:0.50\"\n",
+        "#HISPEED 00\n",
+        "#00110: 11\n",
+        "#NOSPEED\n",
+        "#00150: 31",
+    );
+    let chart = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+
+    assert_eq!(chart.notes().len(), 1);
+    assert_eq!(chart.note_speed_group(chart::NoteId::new(0)).unwrap(), None);
 }
 
 #[test]
