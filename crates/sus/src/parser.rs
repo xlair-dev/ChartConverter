@@ -923,6 +923,10 @@ impl Parser {
                 )?;
                 continue;
             }
+            if matches!(token[0], b'1' | b'2') {
+                report_loss("SUS", "non-side AIR direction in XLAIR mode");
+                continue;
+            }
             let button = match token[0] {
                 b'3' => SideButton::LeftUpper,
                 b'4' => SideButton::RightUpper,

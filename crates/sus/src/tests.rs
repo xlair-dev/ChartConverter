@@ -123,6 +123,14 @@ fn maps_each_xlair_directional_code_to_its_side_button() {
 }
 
 #[test]
+fn omits_non_diagonal_air_directions_in_xlair_mode() {
+    let chart = super::parse_with_mode("#00150: 11 21", chart::ChartMode::Xlair)
+        .expect("valid non-side directional notes are unsupported in XLAIR");
+
+    assert!(chart.notes().is_empty());
+}
+
+#[test]
 fn maps_xlair_side_holds_to_the_buttons_defined_by_their_start_lanes() {
     for (lane, button) in [
         ('0', SideButton::LeftUpper),
