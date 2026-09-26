@@ -265,6 +265,35 @@ fn parses_central_slider_points_across_data_lines() {
 }
 
 #[test]
+fn orders_slide_points_by_position_across_lane_records() {
+    let chart = parse("#00130A: 00140034\n#00136A: 0034\n#00234A: 24")
+        .expect("valid SUS slide points can be recorded in non-temporal line order");
+
+    let NoteKind::Slide { points } = chart.notes()[0].kind() else {
+        panic!("expected a slide");
+    };
+    assert_eq!(points.len(), 4);
+    assert_eq!(points[0].position(), Position::new(5, 1).unwrap());
+    assert_eq!(points[1].position(), Position::new(6, 1).unwrap());
+    assert_eq!(points[2].position(), Position::new(7, 1).unwrap());
+    assert_eq!(points[3].position(), Position::new(8, 1).unwrap());
+}
+
+#[test]
+fn resolves_slide_endpoints_after_points_from_other_lane_records() {
+    let chart = parse("#00130A: 1222\n#00135A: 00510000")
+        .expect("a slide endpoint can precede its intermediate point in file order");
+
+    let NoteKind::Slide { points } = chart.notes()[0].kind() else {
+        panic!("expected a slide");
+    };
+    assert_eq!(points.len(), 3);
+    assert_eq!(points[0].position(), Position::new(4, 1).unwrap());
+    assert_eq!(points[1].position(), Position::new(5, 1).unwrap());
+    assert_eq!(points[2].position(), Position::new(6, 1).unwrap());
+}
+
+#[test]
 fn parses_slide_two_channels() {
     let chart = parse("#00140A: 144g\n#0024cA: 24").expect("valid SUS");
 
