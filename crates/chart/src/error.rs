@@ -24,6 +24,8 @@ pub enum ChartError {
     InvalidSlidePointOrder,
     #[error("tempo must be finite and greater than zero")]
     InvalidTempo,
+    #[error("audio offset must be finite")]
+    InvalidAudioOffset,
     #[error("scroll speed must be finite")]
     InvalidScrollSpeed,
     #[error("scroll speed duration must be greater than zero")]
