@@ -251,6 +251,9 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
     if let Some(base_bpm) = chart.base_bpm() {
         output.push_str(&format!("#BASEBPM {base_bpm}\n"));
     }
+    if let Some(seconds) = chart.audio_offset_seconds() {
+        output.push_str(&format!("#WAVEOFFSET {seconds}\n"));
+    }
     for &(measure, length) in chart.measure_lengths() {
         output.push_str(&format!("#{measure:03}02: {}\n", format_position(length)?));
     }
@@ -322,6 +325,9 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
     }
     if let Some(base_bpm) = chart.base_bpm() {
         output.push_str(&format!("#BASEBPM {base_bpm}\n"));
+    }
+    if let Some(seconds) = chart.audio_offset_seconds() {
+        output.push_str(&format!("#WAVEOFFSET {seconds}\n"));
     }
     for &(measure, length) in chart.measure_lengths() {
         output.push_str(&format!("#{measure:03}02: {}\n", format_position(length)?));

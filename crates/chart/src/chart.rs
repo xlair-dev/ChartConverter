@@ -52,6 +52,7 @@ pub struct Chart {
     tempo_changes: Vec<TempoChange>,
     scroll_speed_changes: Vec<ScrollSpeedChange>,
     measure_lengths: Vec<(u32, Position)>,
+    audio_offset_seconds: Option<f64>,
     priority_enabled: Option<bool>,
     base_bpm: Option<f64>,
 }
@@ -74,6 +75,15 @@ impl Chart {
 
     pub fn add_scroll_speed_change(&mut self, change: ScrollSpeedChange) {
         self.scroll_speed_changes.push(change);
+    }
+
+    /// Stores the audio offset in seconds; positive values start chart playback before audio.
+    pub fn set_audio_offset_seconds(&mut self, seconds: f64) -> Result<(), ChartError> {
+        if !seconds.is_finite() {
+            return Err(ChartError::InvalidAudioOffset);
+        }
+        self.audio_offset_seconds = Some(seconds);
+        Ok(())
     }
 
     /// Stores the SUS priority-rendering request when the source specifies it.
@@ -183,6 +193,11 @@ impl Chart {
     /// Returns measure-length changes in ascending measure order.
     pub fn measure_lengths(&self) -> &[(u32, Position)] {
         &self.measure_lengths
+    }
+
+    /// Returns the source audio offset in seconds, if specified.
+    pub fn audio_offset_seconds(&self) -> Option<f64> {
+        self.audio_offset_seconds
     }
 
     /// Returns the SUS priority-rendering request, if one was specified.
