@@ -20,6 +20,20 @@ struct PendingSlide {
     side_button: Option<SideButton>,
 }
 
+struct PendingSlider {
+    points: Vec<SlidePoint>,
+}
+
+struct SliderEvent {
+    line: usize,
+    channel: char,
+    position: Position,
+    lane: Lane,
+    kind: u8,
+    attributes: NoteAttributes,
+    speed_group: Option<u32>,
+}
+
 enum PendingStandardAir {
     Tap {
         position: Position,
@@ -45,7 +59,8 @@ pub(super) struct Parser {
     bpm_definitions: HashMap<String, f64>,
     pending_side_longs: HashMap<char, PendingSlide>,
     pending_holds: HashMap<char, PendingSlide>,
-    pending_sliders: HashMap<char, PendingSlide>,
+    pending_sliders: HashMap<char, PendingSlider>,
+    slider_events: Vec<SliderEvent>,
     ticks_per_beat: u64,
     measure_base: u32,
     current_speed_group: Option<u32>,
@@ -66,6 +81,7 @@ impl Parser {
             pending_side_longs: HashMap::new(),
             pending_holds: HashMap::new(),
             pending_sliders: HashMap::new(),
+            slider_events: Vec::new(),
             ticks_per_beat: 480,
             measure_base: 0,
             current_speed_group: None,
@@ -190,6 +206,7 @@ impl Parser {
         if let Some(channel) = self.pending_holds.keys().next().copied() {
             return Err(SusError::MissingEnd { channel });
         }
+        self.resolve_sliders()?;
         if let Some(channel) = self.pending_sliders.keys().next().copied() {
             return Err(SusError::MissingEnd { channel });
         }
@@ -1104,51 +1121,83 @@ impl Parser {
             let width = base36_byte(token[1], line)?;
             let lane =
                 Lane::slider(lane, width).map_err(|source| SusError::Chart { line, source })?;
-            match token[0] {
+            if !matches!(token[0], b'1'..=b'5') {
+                return Err(invalid_token(line, token));
+            }
+            self.slider_events.push(SliderEvent {
+                line,
+                channel,
+                position,
+                lane,
+                kind: token[0],
+                attributes: self.current_attributes.unwrap_or_default(),
+                speed_group: self.current_speed_group,
+            });
+        }
+        Ok(())
+    }
+
+    fn resolve_sliders(&mut self) -> Result<(), SusError> {
+        self.slider_events
+            .sort_by_key(|event| (event.position, event.line));
+        for event in std::mem::take(&mut self.slider_events) {
+            match event.kind {
                 b'1' => {
-                    if self.pending_sliders.contains_key(&channel) {
+                    if self.pending_sliders.contains_key(&event.channel) {
                         return Err(SusError::InvalidValue {
-                            line,
-                            value: channel.to_string(),
+                            line: event.line,
+                            value: event.channel.to_string(),
                         });
                     }
                     self.pending_sliders.insert(
-                        channel,
-                        PendingSlide {
-                            points: vec![SlidePoint::new(position, lane)],
-                            side_button: None,
+                        event.channel,
+                        PendingSlider {
+                            points: vec![SlidePoint::new(event.position, event.lane)],
                         },
                     );
                 }
                 b'2' => {
-                    let pending = self
-                        .pending_sliders
-                        .remove(&channel)
-                        .ok_or(SusError::MissingStart { line, channel })?;
-                    let mut points = pending.points;
-                    points.push(SlidePoint::new(position, lane));
-                    let start = points[0].clone();
-                    self.add_note(
-                        line,
-                        Note::new(start.position(), start.lane(), NoteKind::Slide { points })
-                            .map_err(|source| SusError::Chart { line, source })?,
+                    let pending = self.pending_sliders.remove(&event.channel).ok_or(
+                        SusError::MissingStart {
+                            line: event.line,
+                            channel: event.channel,
+                        },
                     )?;
+                    let mut points = pending.points;
+                    points.push(SlidePoint::new(event.position, event.lane));
+                    let start = points[0].clone();
+                    let note =
+                        Note::new(start.position(), start.lane(), NoteKind::Slide { points })
+                            .map_err(|source| SusError::Chart {
+                                line: event.line,
+                                source,
+                            })?
+                            .with_attributes(event.attributes);
+                    let note_id = self.chart.add_note(note);
+                    self.chart
+                        .set_note_speed_group(note_id, event.speed_group)
+                        .map_err(|source| SusError::Chart {
+                            line: event.line,
+                            source,
+                        })?;
                 }
                 b'3'..=b'5' => {
-                    let pending = self
-                        .pending_sliders
-                        .get_mut(&channel)
-                        .ok_or(SusError::MissingStart { line, channel })?;
-                    let point_kind = match token[0] {
+                    let pending = self.pending_sliders.get_mut(&event.channel).ok_or(
+                        SusError::MissingStart {
+                            line: event.line,
+                            channel: event.channel,
+                        },
+                    )?;
+                    let point_kind = match event.kind {
                         b'4' => SlidePointKind::Control,
                         b'5' => SlidePointKind::Invisible,
                         _ => SlidePointKind::Visible,
                     };
                     pending
                         .points
-                        .push(SlidePoint::new(position, lane).with_kind(point_kind));
+                        .push(SlidePoint::new(event.position, event.lane).with_kind(point_kind));
                 }
-                _ => return Err(invalid_token(line, token)),
+                _ => unreachable!(),
             }
         }
         Ok(())
