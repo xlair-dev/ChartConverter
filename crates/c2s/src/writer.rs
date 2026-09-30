@@ -351,6 +351,7 @@ fn parent_type(chart: &Chart, parent: NoteId) -> Result<&'static str, C2sError> 
         NoteKind::Mine => Ok("MNE"),
         NoteKind::Hold { .. } => Ok("HLD"),
         NoteKind::ExHold { .. } => Ok("HLD"),
+        NoteKind::AirHold { .. } => Ok("AHD"),
         NoteKind::Slide { .. } => Ok("SLD"),
         NoteKind::ExSlide { .. } => Ok("SLD"),
         _ => Err(unsupported("unsupported AIR parent")),
