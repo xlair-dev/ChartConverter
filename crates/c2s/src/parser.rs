@@ -27,6 +27,7 @@ struct Parser {
     last_flick_parent: Option<NoteId>,
     last_mine_parent: Option<NoteId>,
     last_hold_parent: Option<NoteId>,
+    last_air_hold_parent: Option<NoteId>,
     last_slide_parent: Option<NoteId>,
     speed_assignments: Vec<(usize, Position, Lane, u64, u32)>,
 }
@@ -43,6 +44,7 @@ impl Parser {
             last_flick_parent: None,
             last_mine_parent: None,
             last_hold_parent: None,
+            last_air_hold_parent: None,
             last_slide_parent: None,
             speed_assignments: Vec::new(),
         }
@@ -465,7 +467,7 @@ impl Parser {
             })?,
         )?;
         let properties = AirProperties::without_direction().with_color(color);
-        self.add_note(
+        let id = self.add_note(
             line,
             Note::new(
                 start,
@@ -477,6 +479,7 @@ impl Parser {
                 },
             ),
         )?;
+        self.last_air_hold_parent = Some(id);
         Ok(())
     }
 
@@ -700,6 +703,7 @@ impl Parser {
             &"FLK" => self.last_flick_parent,
             &"MNE" => self.last_mine_parent,
             &"HLD" => self.last_hold_parent,
+            &"AHD" => self.last_air_hold_parent,
             &"SLD" => self.last_slide_parent,
             target => {
                 return Err(C2sError::InvalidValue {
