@@ -12,6 +12,9 @@ pub(super) fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, 
     if chart.priority_enabled().is_some() {
         report_loss("UGC", "SUS enable_priority request");
     }
+    if chart.audio_offset_seconds().is_some() {
+        report_loss("UGC", "SUS WAVEOFFSET");
+    }
     let base_bpm = chart.base_bpm();
     let timeline = output_timeline(chart);
     let mut tempo_records = Vec::new();

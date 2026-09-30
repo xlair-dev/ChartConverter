@@ -124,6 +124,20 @@ impl Parser {
                     .map_err(|source| SusError::Chart { line, source })?;
                 continue;
             }
+            if command.split_whitespace().next() == Some("WAVEOFFSET") {
+                let value = command
+                    .split_whitespace()
+                    .nth(1)
+                    .ok_or(SusError::MalformedCommand { line })?;
+                let seconds = value.parse::<f64>().map_err(|_| SusError::InvalidValue {
+                    line,
+                    value: value.to_owned(),
+                })?;
+                self.chart
+                    .set_audio_offset_seconds(seconds)
+                    .map_err(|source| SusError::Chart { line, source })?;
+                continue;
+            }
             if command.starts_with("HISPEED") {
                 self.current_speed_group = Some(parse_group(
                     line,

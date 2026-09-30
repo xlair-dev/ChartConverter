@@ -15,6 +15,9 @@ pub(super) fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, 
     if chart.base_bpm().is_some() {
         report_loss("C2S", "SUS BASEBPM");
     }
+    if chart.audio_offset_seconds().is_some() {
+        report_loss("C2S", "SUS WAVEOFFSET");
+    }
     let mut records = Vec::new();
     let mut speed_groups = BTreeSet::new();
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {
