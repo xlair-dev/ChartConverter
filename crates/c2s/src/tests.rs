@@ -21,6 +21,14 @@ fn parses_timing_taps_holds_and_slides() {
 }
 
 #[test]
+fn parses_zero_meter_components() {
+    let chart = parse("RESOLUTION\t384\nMET\t156\t0\t4\t0\n").expect("valid C2S meter record");
+
+    assert!(chart.notes().is_empty());
+    assert!(chart.tempo_changes().is_empty());
+}
+
+#[test]
 fn parses_mines_air_parents_and_scroll_speed_records() {
     let source = "RESOLUTION\t384\nCHR\t0\t0\t4\t2\tDW\nAIR\t0\t0\t4\t2\tCHR\tDEF\nMNE\t0\t96\t8\t1\nSFL\t0\t0\t96\t1.5\nSLP\t1\t0\t96\t2.0\t3\n";
     let chart = parse(source).expect("valid extended C2S");

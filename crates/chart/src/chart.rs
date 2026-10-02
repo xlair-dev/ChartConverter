@@ -5,30 +5,6 @@ use crate::{
     timing::{ScrollSpeedChange, TempoChange},
 };
 
-#[cfg(test)]
-mod tests {
-    use super::Chart;
-    use crate::{Lane, Note, NoteKind, Position, TapKind};
-
-    #[test]
-    fn assigns_speed_groups_to_note_ids() {
-        let mut chart = Chart::new();
-        let note_id = chart.add_note(
-            Note::new(
-                Position::new(0, 1).unwrap(),
-                Lane::slider(0, 1).unwrap(),
-                NoteKind::Tap(TapKind::Tap),
-            )
-            .unwrap(),
-        );
-
-        chart
-            .set_note_speed_group(note_id, Some(2))
-            .expect("valid note id");
-        assert_eq!(chart.note_speed_group(note_id).unwrap(), Some(2));
-    }
-}
-
 /// Identifies a note by its insertion index in a chart.
 ///
 /// A chart implementation must preserve this identity when it reorders notes.
@@ -208,5 +184,29 @@ impl Chart {
     /// Returns the SUS base BPM, if one was specified.
     pub fn base_bpm(&self) -> Option<f64> {
         self.base_bpm
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Chart;
+    use crate::{Lane, Note, NoteKind, Position, TapKind};
+
+    #[test]
+    fn assigns_speed_groups_to_note_ids() {
+        let mut chart = Chart::new();
+        let note_id = chart.add_note(
+            Note::new(
+                Position::new(0, 1).unwrap(),
+                Lane::slider(0, 1).unwrap(),
+                NoteKind::Tap(TapKind::Tap),
+            )
+            .unwrap(),
+        );
+
+        chart
+            .set_note_speed_group(note_id, Some(2))
+            .expect("valid note id");
+        assert_eq!(chart.note_speed_group(note_id).unwrap(), Some(2));
     }
 }

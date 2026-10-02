@@ -1,237 +1,3 @@
-#[cfg(test)]
-mod tests {
-    use super::{
-        AirColor, AirCrushColor, AirCrushInterval, AirCrushPoint, AirPoint, AirProperties, Lane,
-        Note, NoteKind, SideButton, SlidePoint, TapKind,
-    };
-    use crate::{ExDirection, NoteId, Position};
-
-    #[test]
-    fn rejects_a_hold_that_does_not_advance_in_time() {
-        let position = Position::new(1, 1).expect("valid position");
-
-        assert!(
-            Note::new(
-                position,
-                Lane::slider(0, 1).expect("valid lane"),
-                NoteKind::Hold { end: position },
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn accepts_xlair_side_button_notes() {
-        let position = Position::new(1, 1).expect("valid position");
-
-        assert!(
-            Note::new(
-                position,
-                Lane::Side(SideButton::LeftUpper),
-                NoteKind::Tap(TapKind::Tap),
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn lane_overlap_uses_slider_intervals_only() {
-        let left = Lane::slider(2, 4).unwrap();
-        assert!(left.overlaps(Lane::slider(5, 2).unwrap()));
-        assert!(!left.overlaps(Lane::slider(6, 2).unwrap()));
-        assert!(!left.overlaps(Lane::Side(SideButton::LeftLower)));
-        assert_eq!(
-            SideButton::from_xlair_lane_start(12),
-            Some(SideButton::RightUpper)
-        );
-        assert_eq!(
-            SideButton::from_xlair_lane_start(14),
-            Some(SideButton::RightLower)
-        );
-    }
-
-    #[test]
-    fn air_notes_keep_their_parent_reference() {
-        let position = Position::new(1, 1).expect("valid position");
-
-        let note = Note::new(
-            position,
-            Lane::slider(0, 1).expect("valid lane"),
-            NoteKind::Air {
-                properties: AirProperties::new(super::AirDirection::Up),
-                parent: NoteId::new(3),
-            },
-        )
-        .expect("valid air note");
-
-        assert_eq!(
-            note.kind(),
-            &NoteKind::Air {
-                properties: AirProperties::new(super::AirDirection::Up),
-                parent: NoteId::new(3),
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_a_slide_with_only_one_point() {
-        let position = Position::new(1, 1).expect("valid position");
-
-        assert!(
-            Note::new(
-                position,
-                Lane::slider(0, 1).expect("valid lane"),
-                NoteKind::Slide {
-                    points: vec![SlidePoint::new(
-                        position,
-                        Lane::slider(0, 1).expect("valid lane")
-                    )],
-                },
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn accepts_control_points_at_the_same_time_as_the_previous_point() {
-        let start = Position::new(0, 1).expect("valid position");
-        let end = Position::new(1, 1).expect("valid position");
-        let lane = Lane::slider(0, 4).expect("valid lane");
-        let points = vec![
-            SlidePoint::new(start, lane),
-            SlidePoint::new(start, Lane::slider(1, 2).expect("valid lane"))
-                .with_kind(super::SlidePointKind::Control),
-            SlidePoint::new(end, Lane::slider(4, 4).expect("valid lane")),
-        ];
-
-        assert!(Note::new(start, lane, NoteKind::Slide { points }).is_ok());
-    }
-
-    #[test]
-    fn rejects_an_air_hold_that_does_not_advance_in_time() {
-        let position = Position::new(1, 1).expect("valid position");
-
-        assert!(
-            Note::new(
-                position,
-                Lane::slider(0, 1).expect("valid lane"),
-                NoteKind::AirHold {
-                    end: position,
-                    properties: AirProperties::new(super::AirDirection::Up),
-                    parent: NoteId::new(0),
-                },
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn preserves_air_attributes_and_rejects_invalid_height() {
-        let properties = AirProperties::new(super::AirDirection::UpperRight)
-            .with_height(2.5)
-            .expect("valid height")
-            .with_color(AirColor::Inverted);
-        assert_eq!(properties.height(), Some(2.5));
-        assert_eq!(properties.color(), AirColor::Inverted);
-        assert!(
-            AirProperties::new(super::AirDirection::Up)
-                .with_height(f64::NAN)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn accepts_ex_long_notes_and_preserves_their_direction() {
-        let start = Position::new(0, 1).expect("valid position");
-        let end = Position::new(1, 1).expect("valid position");
-        let note = Note::new(
-            start,
-            Lane::slider(0, 4).expect("valid lane"),
-            NoteKind::ExHold {
-                end,
-                direction: ExDirection::Left,
-            },
-        )
-        .expect("valid Ex Hold");
-
-        assert_eq!(
-            note.kind(),
-            &NoteKind::ExHold {
-                end,
-                direction: ExDirection::Left,
-            }
-        );
-    }
-
-    #[test]
-    fn validates_air_crush_points_and_interval() {
-        let start = Position::new(0, 1).expect("valid position");
-        let end = Position::new(1, 1).expect("valid position");
-        let lane = Lane::slider(0, 4).expect("valid lane");
-        let points = vec![
-            AirCrushPoint::new(start, lane, 5.0).expect("valid height"),
-            AirCrushPoint::new(end, Lane::slider(4, 4).expect("valid lane"), 6.0)
-                .expect("valid height"),
-        ];
-        let note = Note::new(
-            start,
-            lane,
-            NoteKind::AirCrush {
-                points,
-                color: AirCrushColor::Normal,
-                interval: AirCrushInterval::Every(Position::new(1, 4).unwrap()),
-                parent: NoteId::new(0),
-            },
-        )
-        .expect("valid Air Crush");
-
-        assert!(matches!(note.kind(), NoteKind::AirCrush { .. }));
-        assert!(
-            Note::new(
-                start,
-                lane,
-                NoteKind::AirCrush {
-                    points: vec![
-                        AirCrushPoint::new(start, lane, 5.0).unwrap(),
-                        AirCrushPoint::new(end, Lane::slider(4, 4).unwrap(), 6.0).unwrap(),
-                    ],
-                    color: AirCrushColor::Normal,
-                    interval: AirCrushInterval::Every(Position::new(0, 1).unwrap()),
-                    parent: NoteId::new(0),
-                },
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn preserves_heights_on_air_slide_points() {
-        let start = Position::new(0, 1).unwrap();
-        let middle = Position::new(1, 2).unwrap();
-        let end = Position::new(1, 1).unwrap();
-        let start_lane = Lane::slider(0, 4).unwrap();
-        let points = vec![
-            AirPoint::new(start, start_lane, 2.0).unwrap(),
-            AirPoint::new(middle, Lane::slider(4, 4).unwrap(), 2.5).unwrap(),
-            AirPoint::new(end, Lane::slider(8, 4).unwrap(), 3.0).unwrap(),
-        ];
-        let note = Note::new(
-            start,
-            start_lane,
-            NoteKind::AirSlide {
-                points,
-                color: AirColor::Normal,
-                parent: NoteId::new(0),
-            },
-        )
-        .expect("valid AIR Slide");
-
-        let NoteKind::AirSlide { points, .. } = note.kind() else {
-            panic!("expected AIR Slide");
-        };
-        assert_eq!(points[1].height(), 2.5);
-    }
-}
 use crate::{ChartError, NoteId, Position};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -758,4 +524,239 @@ fn validate_slide(position: Position, lane: Lane, points: &[SlidePoint]) -> Resu
 /// C2S can encode zero-duration segments, so path points are non-decreasing.
 fn is_invalid_point_order(previous: Position, current: Position) -> bool {
     previous > current
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AirColor, AirCrushColor, AirCrushInterval, AirCrushPoint, AirPoint, AirProperties, Lane,
+        Note, NoteKind, SideButton, SlidePoint, TapKind,
+    };
+    use crate::{ExDirection, NoteId, Position};
+
+    #[test]
+    fn rejects_a_hold_that_does_not_advance_in_time() {
+        let position = Position::new(1, 1).expect("valid position");
+
+        assert!(
+            Note::new(
+                position,
+                Lane::slider(0, 1).expect("valid lane"),
+                NoteKind::Hold { end: position },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn accepts_xlair_side_button_notes() {
+        let position = Position::new(1, 1).expect("valid position");
+
+        assert!(
+            Note::new(
+                position,
+                Lane::Side(SideButton::LeftUpper),
+                NoteKind::Tap(TapKind::Tap),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn lane_overlap_uses_slider_intervals_only() {
+        let left = Lane::slider(2, 4).unwrap();
+        assert!(left.overlaps(Lane::slider(5, 2).unwrap()));
+        assert!(!left.overlaps(Lane::slider(6, 2).unwrap()));
+        assert!(!left.overlaps(Lane::Side(SideButton::LeftLower)));
+        assert_eq!(
+            SideButton::from_xlair_lane_start(12),
+            Some(SideButton::RightUpper)
+        );
+        assert_eq!(
+            SideButton::from_xlair_lane_start(14),
+            Some(SideButton::RightLower)
+        );
+    }
+
+    #[test]
+    fn air_notes_keep_their_parent_reference() {
+        let position = Position::new(1, 1).expect("valid position");
+
+        let note = Note::new(
+            position,
+            Lane::slider(0, 1).expect("valid lane"),
+            NoteKind::Air {
+                properties: AirProperties::new(super::AirDirection::Up),
+                parent: NoteId::new(3),
+            },
+        )
+        .expect("valid air note");
+
+        assert_eq!(
+            note.kind(),
+            &NoteKind::Air {
+                properties: AirProperties::new(super::AirDirection::Up),
+                parent: NoteId::new(3),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_a_slide_with_only_one_point() {
+        let position = Position::new(1, 1).expect("valid position");
+
+        assert!(
+            Note::new(
+                position,
+                Lane::slider(0, 1).expect("valid lane"),
+                NoteKind::Slide {
+                    points: vec![SlidePoint::new(
+                        position,
+                        Lane::slider(0, 1).expect("valid lane")
+                    )],
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn accepts_control_points_at_the_same_time_as_the_previous_point() {
+        let start = Position::new(0, 1).expect("valid position");
+        let end = Position::new(1, 1).expect("valid position");
+        let lane = Lane::slider(0, 4).expect("valid lane");
+        let points = vec![
+            SlidePoint::new(start, lane),
+            SlidePoint::new(start, Lane::slider(1, 2).expect("valid lane"))
+                .with_kind(super::SlidePointKind::Control),
+            SlidePoint::new(end, Lane::slider(4, 4).expect("valid lane")),
+        ];
+
+        assert!(Note::new(start, lane, NoteKind::Slide { points }).is_ok());
+    }
+
+    #[test]
+    fn rejects_an_air_hold_that_does_not_advance_in_time() {
+        let position = Position::new(1, 1).expect("valid position");
+
+        assert!(
+            Note::new(
+                position,
+                Lane::slider(0, 1).expect("valid lane"),
+                NoteKind::AirHold {
+                    end: position,
+                    properties: AirProperties::new(super::AirDirection::Up),
+                    parent: NoteId::new(0),
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn preserves_air_attributes_and_rejects_invalid_height() {
+        let properties = AirProperties::new(super::AirDirection::UpperRight)
+            .with_height(2.5)
+            .expect("valid height")
+            .with_color(AirColor::Inverted);
+        assert_eq!(properties.height(), Some(2.5));
+        assert_eq!(properties.color(), AirColor::Inverted);
+        assert!(
+            AirProperties::new(super::AirDirection::Up)
+                .with_height(f64::NAN)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn accepts_ex_long_notes_and_preserves_their_direction() {
+        let start = Position::new(0, 1).expect("valid position");
+        let end = Position::new(1, 1).expect("valid position");
+        let note = Note::new(
+            start,
+            Lane::slider(0, 4).expect("valid lane"),
+            NoteKind::ExHold {
+                end,
+                direction: ExDirection::Left,
+            },
+        )
+        .expect("valid Ex Hold");
+
+        assert_eq!(
+            note.kind(),
+            &NoteKind::ExHold {
+                end,
+                direction: ExDirection::Left,
+            }
+        );
+    }
+
+    #[test]
+    fn validates_air_crush_points_and_interval() {
+        let start = Position::new(0, 1).expect("valid position");
+        let end = Position::new(1, 1).expect("valid position");
+        let lane = Lane::slider(0, 4).expect("valid lane");
+        let points = vec![
+            AirCrushPoint::new(start, lane, 5.0).expect("valid height"),
+            AirCrushPoint::new(end, Lane::slider(4, 4).expect("valid lane"), 6.0)
+                .expect("valid height"),
+        ];
+        let note = Note::new(
+            start,
+            lane,
+            NoteKind::AirCrush {
+                points,
+                color: AirCrushColor::Normal,
+                interval: AirCrushInterval::Every(Position::new(1, 4).unwrap()),
+                parent: NoteId::new(0),
+            },
+        )
+        .expect("valid Air Crush");
+
+        assert!(matches!(note.kind(), NoteKind::AirCrush { .. }));
+        assert!(
+            Note::new(
+                start,
+                lane,
+                NoteKind::AirCrush {
+                    points: vec![
+                        AirCrushPoint::new(start, lane, 5.0).unwrap(),
+                        AirCrushPoint::new(end, Lane::slider(4, 4).unwrap(), 6.0).unwrap(),
+                    ],
+                    color: AirCrushColor::Normal,
+                    interval: AirCrushInterval::Every(Position::new(0, 1).unwrap()),
+                    parent: NoteId::new(0),
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn preserves_heights_on_air_slide_points() {
+        let start = Position::new(0, 1).unwrap();
+        let middle = Position::new(1, 2).unwrap();
+        let end = Position::new(1, 1).unwrap();
+        let start_lane = Lane::slider(0, 4).unwrap();
+        let points = vec![
+            AirPoint::new(start, start_lane, 2.0).unwrap(),
+            AirPoint::new(middle, Lane::slider(4, 4).unwrap(), 2.5).unwrap(),
+            AirPoint::new(end, Lane::slider(8, 4).unwrap(), 3.0).unwrap(),
+        ];
+        let note = Note::new(
+            start,
+            start_lane,
+            NoteKind::AirSlide {
+                points,
+                color: AirColor::Normal,
+                parent: NoteId::new(0),
+            },
+        )
+        .expect("valid AIR Slide");
+
+        let NoteKind::AirSlide { points, .. } = note.kind() else {
+            panic!("expected AIR Slide");
+        };
+        assert_eq!(points[1].height(), 2.5);
+    }
 }
