@@ -142,20 +142,14 @@ impl Parser {
             line,
             fields.get(2).ok_or(C2sError::MalformedRecord { line })?,
         )?;
-        let numerator = parse_u64(
+        let _numerator = parse_u64(
             line,
             fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
         )?;
-        let denominator = parse_u64(
+        let _denominator = parse_u64(
             line,
             fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
         )?;
-        if numerator == 0 || denominator == 0 {
-            return Err(C2sError::InvalidValue {
-                line,
-                value: format!("{numerator}/{denominator}"),
-            });
-        }
         // C2S MET changes display meter only; it does not change chart time.
         Ok(())
     }
