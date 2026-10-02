@@ -1,32 +1,3 @@
-#[cfg(test)]
-mod tests {
-    use super::{ScrollScope, ScrollSpeedChange, TempoChange};
-    use crate::{NoteId, Position};
-
-    #[test]
-    fn rejects_non_positive_tempo() {
-        let position = Position::new(0, 1).expect("valid position");
-
-        assert!(TempoChange::new(position, 0.0).is_err());
-    }
-
-    #[test]
-    fn rejects_non_finite_scroll_speed() {
-        let position = Position::new(0, 1).expect("valid position");
-
-        assert!(ScrollSpeedChange::new(position, f64::NAN).is_err());
-    }
-
-    #[test]
-    fn preserves_the_scope_of_a_speed_change() {
-        let position = Position::new(0, 1).expect("valid position");
-        let change =
-            ScrollSpeedChange::with_scope(position, 1.0, ScrollScope::Note(NoteId::new(2)))
-                .expect("valid speed change");
-
-        assert_eq!(change.scope(), ScrollScope::Note(NoteId::new(2)));
-    }
-}
 use crate::{ChartError, Lane, NoteId, Position};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -121,5 +92,35 @@ impl ScrollSpeedChange {
 
     pub fn duration(&self) -> Option<Position> {
         self.duration
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ScrollScope, ScrollSpeedChange, TempoChange};
+    use crate::{NoteId, Position};
+
+    #[test]
+    fn rejects_non_positive_tempo() {
+        let position = Position::new(0, 1).expect("valid position");
+
+        assert!(TempoChange::new(position, 0.0).is_err());
+    }
+
+    #[test]
+    fn rejects_non_finite_scroll_speed() {
+        let position = Position::new(0, 1).expect("valid position");
+
+        assert!(ScrollSpeedChange::new(position, f64::NAN).is_err());
+    }
+
+    #[test]
+    fn preserves_the_scope_of_a_speed_change() {
+        let position = Position::new(0, 1).expect("valid position");
+        let change =
+            ScrollSpeedChange::with_scope(position, 1.0, ScrollScope::Note(NoteId::new(2)))
+                .expect("valid speed change");
+
+        assert_eq!(change.scope(), ScrollScope::Note(NoteId::new(2)));
     }
 }
