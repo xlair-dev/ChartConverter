@@ -157,7 +157,6 @@ fn xlair_side_taps_replace_overlapping_central_taps_in_either_record_order() {
     for source in [
         "#00110: 11\n#00150: 31",
         "#00150: 31\n#00110: 11",
-        "#00110: 21\n#00150: 31",
         "#00110: 31\n#00150: 31",
     ] {
         let chart =
@@ -165,6 +164,25 @@ fn xlair_side_taps_replace_overlapping_central_taps_in_either_record_order() {
         assert_eq!(chart.notes().len(), 1);
         assert_eq!(chart.notes()[0].lane(), Lane::Side(SideButton::LeftUpper));
         assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::Tap));
+    }
+}
+
+#[test]
+fn xlair_side_ex_taps_keep_the_xtap_parent_in_either_record_order() {
+    for source in ["#00110: 21\n#00150: 31", "#00150: 31\n#00110: 21"] {
+        let chart =
+            super::parse_with_mode(source, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
+
+        assert_eq!(chart.notes().len(), 2);
+        assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::XTap));
+        assert!(matches!(
+            chart.notes()[1].kind(),
+            NoteKind::Air {
+                properties,
+                parent,
+            } if properties.direction() == Some(chart::AirDirection::UpperLeft)
+                && *parent == chart::NoteId::new(0)
+        ));
     }
 }
 
@@ -640,6 +658,7 @@ fn writes_xlair_side_notes() {
             Lane::Side(SideButton::RightLower),
             NoteKind::Hold {
                 end: Position::new(2, 1).unwrap(),
+                checkpoints: Vec::new(),
             },
         )
         .unwrap(),

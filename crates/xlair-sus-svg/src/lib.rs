@@ -54,9 +54,9 @@ fn chart_height(chart: &Chart) -> f64 {
 
 fn note_end_position(note: &Note) -> f64 {
     match note.kind() {
-        NoteKind::Hold { end } | NoteKind::ExHold { end, .. } | NoteKind::AirHold { end, .. } => {
-            position_value(*end)
-        }
+        NoteKind::Hold { end, .. }
+        | NoteKind::ExHold { end, .. }
+        | NoteKind::AirHold { end, .. } => position_value(*end),
         NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => points
             .last()
             .map(|point| position_value(point.position()))
@@ -105,7 +105,7 @@ fn render_note(svg: &mut String, note: &Note) {
         }
         NoteKind::ExTap { .. } => circle(svg, "extap", note.lane(), start_y, 8.0),
         NoteKind::Mine => circle(svg, "mine", note.lane(), start_y, 7.0),
-        NoteKind::Hold { end } | NoteKind::ExHold { end, .. } => {
+        NoteKind::Hold { end, .. } | NoteKind::ExHold { end, .. } => {
             line(svg, "hold", note.lane(), start_y, y_position(*end))
         }
         NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => {
