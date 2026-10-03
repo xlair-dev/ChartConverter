@@ -25,7 +25,7 @@ fn parses_holds_with_implicit_end_lane() {
         .expect("valid UGC hold with an implicit end lane");
     assert!(matches!(
         chart.notes()[0].kind(),
-        NoteKind::Hold { end } if *end == Position::new(1, 1).unwrap()
+        NoteKind::Hold { end, .. } if *end == Position::new(1, 1).unwrap()
     ));
 }
 
@@ -191,6 +191,7 @@ fn parses_air_long_notes_after_their_parent() {
             end,
             properties,
             parent,
+            ..
         } if *end == Position::new(1, 1).unwrap()
             && *parent == chart::NoteId::new(0)
             && properties.direction().is_none()
@@ -223,7 +224,17 @@ fn writes_basic_notes_and_round_trips_them() {
         )
         .unwrap(),
     );
-    chart.add_note(Note::new(start, Lane::slider(0, 4).unwrap(), NoteKind::Hold { end }).unwrap());
+    chart.add_note(
+        Note::new(
+            start,
+            Lane::slider(0, 4).unwrap(),
+            NoteKind::Hold {
+                end,
+                checkpoints: Vec::new(),
+            },
+        )
+        .unwrap(),
+    );
 
     let ugc = write(&chart).expect("valid output");
     assert!(ugc.contains("@ENDHEAD"));
@@ -271,6 +282,7 @@ fn writes_and_parses_ex_long_carriers() {
             Lane::slider(0, 4).unwrap(),
             NoteKind::ExHold {
                 end: middle,
+                checkpoints: Vec::new(),
                 direction: chart::ExDirection::Inward,
             },
         )
@@ -433,6 +445,7 @@ fn writes_air_long_notes_and_round_trips_their_heights() {
             Lane::slider(0, 4).unwrap(),
             NoteKind::Hold {
                 end: Position::new(1, 1).unwrap(),
+                checkpoints: Vec::new(),
             },
         )
         .unwrap(),
@@ -443,6 +456,7 @@ fn writes_air_long_notes_and_round_trips_their_heights() {
             Lane::slider(0, 4).unwrap(),
             NoteKind::AirHold {
                 end: Position::new(1, 1).unwrap(),
+                checkpoints: Vec::new(),
                 properties: chart::AirProperties::without_direction()
                     .with_color(chart::AirColor::Inverted),
                 parent,

@@ -68,8 +68,8 @@ pub(super) struct Parser {
     current_attributes: Option<NoteAttributes>,
     chart: Chart,
     pending_standard_air: Vec<PendingStandardAir>,
-    /// Geometry retained so later central taps are suppressed regardless of record order.
-    side_tap_regions: Vec<(Position, Lane)>,
+    /// Geometry retained so side ExTap pairs resolve regardless of record order.
+    side_tap_regions: Vec<(Position, Lane, SideButton)>,
 }
 
 impl Parser {
@@ -262,6 +262,7 @@ impl Parser {
                     target,
                     NoteKind::AirHold {
                         end,
+                        checkpoints: Vec::new(),
                         properties: AirProperties::without_direction(),
                         parent: NoteId::new(0),
                     },
@@ -299,9 +300,13 @@ impl Parser {
             let kind = match kind {
                 NoteKind::Air { properties, .. } => NoteKind::Air { properties, parent },
                 NoteKind::AirHold {
-                    end, properties, ..
+                    end,
+                    checkpoints,
+                    properties,
+                    ..
                 } => NoteKind::AirHold {
                     end,
+                    checkpoints,
                     properties,
                     parent,
                 },
@@ -506,8 +511,15 @@ impl Parser {
             .map_err(|source| SusError::Chart { line, source })?;
         self.add_note(
             line,
-            Note::new(position, lane, NoteKind::Hold { end })
-                .map_err(|source| SusError::Chart { line, source })?,
+            Note::new(
+                position,
+                lane,
+                NoteKind::Hold {
+                    end,
+                    checkpoints: Vec::new(),
+                },
+            )
+            .map_err(|source| SusError::Chart { line, source })?,
         )
     }
 
@@ -968,7 +980,7 @@ impl Parser {
             let width = base36_byte(token[1], line)?;
             let source_lane =
                 Lane::slider(lane, width).map_err(|source| SusError::Chart { line, source })?;
-            self.side_tap_regions.push((position, source_lane));
+            self.side_tap_regions.push((position, source_lane, button));
             let side_note = Note::new(position, Lane::Side(button), NoteKind::Tap(TapKind::Tap))
                 .map_err(|source| SusError::Chart { line, source })?
                 .with_attributes(self.current_attributes.unwrap_or_default());
@@ -984,6 +996,27 @@ impl Parser {
                         .then_some(NoteId::new(index as u32))
                     });
             if let Some(note_id) = overlapping_tap {
+                if self.chart.notes()[note_id.value() as usize].kind()
+                    == &NoteKind::Tap(TapKind::XTap)
+                {
+                    let direction = match button {
+                        SideButton::LeftUpper => AirDirection::UpperLeft,
+                        SideButton::RightUpper => AirDirection::UpperRight,
+                        SideButton::LeftLower => AirDirection::LowerLeft,
+                        SideButton::RightLower => AirDirection::LowerRight,
+                    };
+                    let air = Note::new(
+                        position,
+                        source_lane,
+                        NoteKind::Air {
+                            properties: AirProperties::new(direction),
+                            parent: note_id,
+                        },
+                    )
+                    .map_err(|source| SusError::Chart { line, source })?;
+                    self.add_note(line, air)?;
+                    continue;
+                }
                 self.chart
                     .replace_note(note_id, side_note)
                     .map_err(|source| SusError::Chart { line, source })?;
@@ -1041,6 +1074,10 @@ impl Parser {
                         pending.points[0].lane(),
                         NoteKind::Hold {
                             end: point.position(),
+                            checkpoints: pending.points[1..]
+                                .iter()
+                                .map(SlidePoint::position)
+                                .collect(),
                         },
                     )
                     .map_err(|source| SusError::Chart { line, source })?,
@@ -1102,7 +1139,13 @@ impl Parser {
                         Note::new(
                             pending.points[0].position(),
                             pending.points[0].lane(),
-                            NoteKind::Hold { end: position },
+                            NoteKind::Hold {
+                                end: position,
+                                checkpoints: pending.points[1..]
+                                    .iter()
+                                    .map(SlidePoint::position)
+                                    .collect(),
+                            },
                         )
                         .map_err(|source| SusError::Chart { line, source })?,
                     )?;
@@ -1218,12 +1261,69 @@ impl Parser {
     }
 
     fn add_note(&mut self, line: usize, note: Note) -> Result<(), SusError> {
-        if self.mode == ChartMode::Xlair
-            && matches!(note.kind(), NoteKind::Tap(_))
-            && self
+        if self.mode == ChartMode::Xlair && note.kind() == &NoteKind::Tap(TapKind::XTap) {
+            let paired_regions: Vec<_> = self
                 .side_tap_regions
                 .iter()
-                .any(|(position, lane)| *position == note.position() && lane.overlaps(note.lane()))
+                .filter(|(position, lane, _)| {
+                    *position == note.position() && lane.overlaps(note.lane())
+                })
+                .copied()
+                .collect();
+            if !paired_regions.is_empty() {
+                let side_note =
+                    self.chart
+                        .notes()
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, existing)| {
+                            (existing.position() == note.position()
+                                && matches!(existing.lane(), Lane::Side(_))
+                                && matches!(existing.kind(), NoteKind::Tap(TapKind::Tap)))
+                            .then_some(NoteId::new(index as u32))
+                        });
+                let note_id = if let Some(note_id) = side_note {
+                    self.chart
+                        .replace_note(
+                            note_id,
+                            note.with_attributes(self.current_attributes.unwrap_or_default()),
+                        )
+                        .map_err(|source| SusError::Chart { line, source })?;
+                    note_id
+                } else {
+                    self.chart
+                        .add_note(note.with_attributes(self.current_attributes.unwrap_or_default()))
+                };
+                self.chart
+                    .set_note_speed_group(note_id, self.current_speed_group)
+                    .map_err(|source| SusError::Chart { line, source })?;
+                for (position, lane, button) in paired_regions {
+                    let direction = match button {
+                        SideButton::LeftUpper => AirDirection::UpperLeft,
+                        SideButton::RightUpper => AirDirection::UpperRight,
+                        SideButton::LeftLower => AirDirection::LowerLeft,
+                        SideButton::RightLower => AirDirection::LowerRight,
+                    };
+                    let air = Note::new(
+                        position,
+                        lane,
+                        NoteKind::Air {
+                            properties: AirProperties::new(direction),
+                            parent: note_id,
+                        },
+                    )
+                    .map_err(|source| SusError::Chart { line, source })?;
+                    self.chart
+                        .add_note(air.with_attributes(self.current_attributes.unwrap_or_default()));
+                }
+                return Ok(());
+            }
+        }
+        if self.mode == ChartMode::Xlair
+            && matches!(note.kind(), NoteKind::Tap(_))
+            && self.side_tap_regions.iter().any(|(position, lane, _)| {
+                *position == note.position() && lane.overlaps(note.lane())
+            })
         {
             return Ok(());
         }

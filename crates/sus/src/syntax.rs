@@ -14,9 +14,9 @@ pub(super) fn standard_parent_code(note: &Note) -> &'static str {
 
 pub(super) fn note_end_position(note: &Note) -> Position {
     match note.kind() {
-        NoteKind::Hold { end } | NoteKind::ExHold { end, .. } | NoteKind::AirHold { end, .. } => {
-            *end
-        }
+        NoteKind::Hold { end, .. }
+        | NoteKind::ExHold { end, .. }
+        | NoteKind::AirHold { end, .. } => *end,
         NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => points
             .last()
             .map(SlidePoint::position)

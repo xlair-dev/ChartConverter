@@ -442,6 +442,20 @@ impl Parser {
                         .then_some(NoteId::new(index as u32))
                     });
             if let Some(note_id) = overlapping_tap {
+                if self.chart.notes()[note_id.value() as usize].kind()
+                    == &NoteKind::Tap(TapKind::XTap)
+                {
+                    let air = Note::new(
+                        position,
+                        lane,
+                        NoteKind::Air {
+                            properties: AirProperties::new(direction),
+                            parent: note_id,
+                        },
+                    )
+                    .map_err(|source| UgcError::Chart { line, source })?;
+                    return Ok((0, Some(air)));
+                }
                 self.chart
                     .replace_note(note_id, side_note)
                     .map_err(|source| UgcError::Chart { line, source })?;
@@ -636,8 +650,9 @@ impl Parser {
             return Ok((consumed, None));
         };
         let note_kind = match (kind, note.kind()) {
-            ('H', NoteKind::Hold { end }) => NoteKind::AirHold {
+            ('H', NoteKind::Hold { end, checkpoints }) => NoteKind::AirHold {
                 end: *end,
+                checkpoints: checkpoints.clone(),
                 properties,
                 parent,
             },
@@ -778,6 +793,10 @@ impl Parser {
                 hold_lane,
                 NoteKind::Hold {
                     end: points.last().unwrap().position(),
+                    checkpoints: points[1..points.len() - 1]
+                        .iter()
+                        .map(SlidePoint::position)
+                        .collect(),
                 },
             )
         } else {
@@ -821,7 +840,11 @@ fn ex_long_note(note: Note, direction: ExDirection) -> Result<Note, ChartError> 
     let position = note.position();
     let lane = note.lane();
     let kind = match note.kind().clone() {
-        NoteKind::Hold { end } => NoteKind::ExHold { end, direction },
+        NoteKind::Hold { end, checkpoints } => NoteKind::ExHold {
+            end,
+            checkpoints,
+            direction,
+        },
         NoteKind::Slide { points } => NoteKind::ExSlide { points, direction },
         _ => unreachable!("ExLong conversion requires a hold or slide"),
     };

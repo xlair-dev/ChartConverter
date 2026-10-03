@@ -162,15 +162,34 @@ fn write_note(
             format!("CHR\t{measure}\t{tick}\t{lane}\t{width}\t{direction}")
         }
         NoteKind::Mine => format!("MNE\t{measure}\t{tick}\t{lane}\t{width}"),
-        NoteKind::Hold { end } => format!(
-            "HLD\t{measure}\t{tick}\t{lane}\t{width}\t{}",
-            duration_ticks(note.position(), *end)?
-        ),
-        NoteKind::ExHold { end, .. } if mode == ChartMode::Xlair => format!(
-            "HLD\t{measure}\t{tick}\t{lane}\t{width}\t{}",
-            duration_ticks(note.position(), *end)?
-        ),
-        NoteKind::ExHold { end, direction } => {
+        NoteKind::Hold { end, checkpoints } => {
+            if !checkpoints.is_empty() {
+                report_loss("C2S", "hold checkpoints");
+            }
+            format!(
+                "HLD\t{measure}\t{tick}\t{lane}\t{width}\t{}",
+                duration_ticks(note.position(), *end)?
+            )
+        }
+        NoteKind::ExHold {
+            end, checkpoints, ..
+        } if mode == ChartMode::Xlair => {
+            if !checkpoints.is_empty() {
+                report_loss("C2S", "hold checkpoints");
+            }
+            format!(
+                "HLD\t{measure}\t{tick}\t{lane}\t{width}\t{}",
+                duration_ticks(note.position(), *end)?
+            )
+        }
+        NoteKind::ExHold {
+            end,
+            direction,
+            checkpoints,
+        } => {
+            if !checkpoints.is_empty() {
+                report_loss("C2S", "hold checkpoints");
+            }
             let direction = encode_ex_direction(*direction)?;
             format!(
                 "HXD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{direction}",
@@ -213,14 +232,20 @@ fn write_note(
         ),
         NoteKind::AirHold {
             end,
+            checkpoints,
             properties,
             parent,
-        } => format!(
-            "AHD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}\t{}",
-            parent_type(chart, *parent)?,
-            duration_ticks(note.position(), *end)?,
-            encode_air_color(properties.color())
-        ),
+        } => {
+            if !checkpoints.is_empty() {
+                report_loss("C2S", "AIR hold checkpoints");
+            }
+            format!(
+                "AHD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}\t{}",
+                parent_type(chart, *parent)?,
+                duration_ticks(note.position(), *end)?,
+                encode_air_color(properties.color())
+            )
+        }
         NoteKind::AirSlide {
             points,
             color,
@@ -390,9 +415,9 @@ fn duration_ticks(start: Position, end: Position) -> Result<u64, C2sError> {
 
 pub(super) fn note_duration_ticks(note: &Note) -> Result<u64, C2sError> {
     match note.kind() {
-        NoteKind::Hold { end } | NoteKind::ExHold { end, .. } | NoteKind::AirHold { end, .. } => {
-            duration_ticks(note.position(), *end)
-        }
+        NoteKind::Hold { end, .. }
+        | NoteKind::ExHold { end, .. }
+        | NoteKind::AirHold { end, .. } => duration_ticks(note.position(), *end),
         NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => {
             let end = points.last().ok_or(C2sError::UnrepresentablePosition)?;
             duration_ticks(note.position(), end.position())

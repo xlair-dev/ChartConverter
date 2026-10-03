@@ -299,9 +299,11 @@ pub enum NoteKind {
     Mine,
     Hold {
         end: Position,
+        checkpoints: Vec<Position>,
     },
     ExHold {
         end: Position,
+        checkpoints: Vec<Position>,
         direction: ExDirection,
     },
     Slide {
@@ -317,6 +319,7 @@ pub enum NoteKind {
     },
     AirHold {
         end: Position,
+        checkpoints: Vec<Position>,
         properties: AirProperties,
         parent: NoteId,
     },
@@ -344,16 +347,37 @@ pub struct Note {
 impl Note {
     pub fn new(position: Position, lane: Lane, kind: NoteKind) -> Result<Self, ChartError> {
         match &kind {
-            NoteKind::Hold { end } | NoteKind::ExHold { end, .. } if *end <= position => {
+            NoteKind::Hold { end, .. } | NoteKind::ExHold { end, .. } if *end <= position => {
                 return Err(ChartError::InvalidHoldEnd);
+            }
+            NoteKind::Hold { end, checkpoints }
+            | NoteKind::ExHold {
+                end, checkpoints, ..
+            } => {
+                if checkpoints
+                    .iter()
+                    .any(|point| *point <= position || *point >= *end)
+                    || checkpoints.windows(2).any(|pair| pair[0] >= pair[1])
+                {
+                    return Err(ChartError::InvalidHoldEnd);
+                }
+            }
+            NoteKind::AirHold {
+                end, checkpoints, ..
+            } => {
+                if *end <= position
+                    || checkpoints
+                        .iter()
+                        .any(|point| *point <= position || *point >= *end)
+                    || checkpoints.windows(2).any(|pair| pair[0] >= pair[1])
+                {
+                    return Err(ChartError::InvalidHoldEnd);
+                }
             }
             NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => {
                 validate_slide(position, lane, points)?;
             }
             NoteKind::AirSlide { points, .. } => validate_air_path(position, lane, points)?,
-            NoteKind::AirHold { end, .. } if *end <= position => {
-                return Err(ChartError::InvalidHoldEnd);
-            }
             NoteKind::AirCrush {
                 points,
                 interval: AirCrushInterval::Every(interval),
@@ -542,7 +566,10 @@ mod tests {
             Note::new(
                 position,
                 Lane::slider(0, 1).expect("valid lane"),
-                NoteKind::Hold { end: position },
+                NoteKind::Hold {
+                    end: position,
+                    checkpoints: Vec::new()
+                },
             )
             .is_err()
         );
@@ -645,6 +672,7 @@ mod tests {
                 Lane::slider(0, 1).expect("valid lane"),
                 NoteKind::AirHold {
                     end: position,
+                    checkpoints: Vec::new(),
                     properties: AirProperties::new(super::AirDirection::Up),
                     parent: NoteId::new(0),
                 },
@@ -677,6 +705,7 @@ mod tests {
             Lane::slider(0, 4).expect("valid lane"),
             NoteKind::ExHold {
                 end,
+                checkpoints: Vec::new(),
                 direction: ExDirection::Left,
             },
         )
@@ -686,6 +715,7 @@ mod tests {
             note.kind(),
             &NoteKind::ExHold {
                 end,
+                checkpoints: Vec::new(),
                 direction: ExDirection::Left,
             }
         );

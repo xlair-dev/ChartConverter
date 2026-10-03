@@ -145,11 +145,12 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                         attributes: NoteAttributes::default(),
                     });
                 }
-                NoteKind::Hold { end } => match note.lane() {
+                NoteKind::Hold { end, checkpoints } => match note.lane() {
                     Lane::Slider { start, width } => add_hold_records(
                         &mut records,
                         note.position(),
                         *end,
+                        checkpoints,
                         start,
                         width,
                         channel,
@@ -159,16 +160,20 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                         &mut records,
                         note.position(),
                         *end,
+                        checkpoints,
                         button,
                         channel,
                         &timing,
                     )?,
                 },
-                NoteKind::ExHold { end, .. } => match note.lane() {
+                NoteKind::ExHold {
+                    end, checkpoints, ..
+                } => match note.lane() {
                     Lane::Slider { start, width } => add_hold_records(
                         &mut records,
                         note.position(),
                         *end,
+                        checkpoints,
                         start,
                         width,
                         channel,
@@ -178,6 +183,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                         &mut records,
                         note.position(),
                         *end,
+                        checkpoints,
                         button,
                         channel,
                         &timing,
@@ -492,9 +498,23 @@ fn standard_ticks_per_beat(chart: &Chart) -> Result<u64, SusError> {
     for note in chart.notes() {
         add_position(note.position())?;
         match note.kind() {
-            NoteKind::Hold { end }
-            | NoteKind::ExHold { end, .. }
-            | NoteKind::AirHold { end, .. } => add_position(*end)?,
+            NoteKind::Hold { end, checkpoints }
+            | NoteKind::ExHold {
+                end, checkpoints, ..
+            } => {
+                add_position(*end)?;
+                for checkpoint in checkpoints {
+                    add_position(*checkpoint)?;
+                }
+            }
+            NoteKind::AirHold {
+                end, checkpoints, ..
+            } => {
+                add_position(*end)?;
+                for checkpoint in checkpoints {
+                    add_position(*checkpoint)?;
+                }
+            }
             NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => {
                 for point in points {
                     add_position(point.position())?;
@@ -603,9 +623,23 @@ fn xlair_ticks_per_beat(chart: &Chart, timeline: &MeasureTimeline) -> Result<u64
     for note in chart.notes() {
         add_position(note.position())?;
         match note.kind() {
-            NoteKind::Hold { end }
-            | NoteKind::ExHold { end, .. }
-            | NoteKind::AirHold { end, .. } => add_position(*end)?,
+            NoteKind::Hold { end, checkpoints }
+            | NoteKind::ExHold {
+                end, checkpoints, ..
+            } => {
+                add_position(*end)?;
+                for checkpoint in checkpoints {
+                    add_position(*checkpoint)?;
+                }
+            }
+            NoteKind::AirHold {
+                end, checkpoints, ..
+            } => {
+                add_position(*end)?;
+                for checkpoint in checkpoints {
+                    add_position(*checkpoint)?;
+                }
+            }
             NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => {
                 for point in points {
                     add_position(point.position())?;
@@ -740,7 +774,13 @@ fn write_standard_note(
             }
         }
         NoteKind::Mine => lines.push(format!("{prefix}: 10{lane_width}")),
-        NoteKind::Hold { end } | NoteKind::ExHold { end, .. } => {
+        NoteKind::Hold { end, checkpoints }
+        | NoteKind::ExHold {
+            end, checkpoints, ..
+        } => {
+            if !checkpoints.is_empty() {
+                report_loss("SUS", "hold checkpoints in standard SUS");
+            }
             let duration = duration_ticks(note.position(), *end, ticks_per_measure)?;
             lines.push(format!("{prefix}: 05{lane_width}{duration:04X}"));
         }
@@ -795,7 +835,15 @@ fn write_standard_note(
                 })?);
             lines.push(format!("{prefix}: {code}{lane_width}{target}"));
         }
-        NoteKind::AirHold { end, parent, .. } => {
+        NoteKind::AirHold {
+            end,
+            checkpoints,
+            parent,
+            ..
+        } => {
+            if !checkpoints.is_empty() {
+                report_loss("SUS", "AIR hold checkpoints in standard SUS");
+            }
             let duration = duration_ticks(note.position(), *end, ticks_per_measure)?;
             let target =
                 standard_parent_code(chart.note(*parent).map_err(|_| SusError::InvalidValue {
@@ -912,6 +960,7 @@ fn add_hold_records(
     records: &mut Vec<Record>,
     start: Position,
     end: Position,
+    checkpoints: &[Position],
     lane: u8,
     width: u8,
     channel: char,
@@ -919,6 +968,17 @@ fn add_hold_records(
 ) -> Result<(), SusError> {
     let (start_measure, start_tick) = output_position(start, timing)?;
     let (end_measure, end_tick) = output_position(end, timing)?;
+    for checkpoint in checkpoints {
+        let (measure, tick) = output_position(*checkpoint, timing)?;
+        records.push(Record {
+            measure,
+            tick,
+            key: format!("3{}{channel}", base36_digit(lane)),
+            token: format!("3{}", base36_digit(width)),
+            speed_group: None,
+            attributes: NoteAttributes::default(),
+        });
+    }
     records.push(Record {
         measure: start_measure,
         tick: start_tick,
@@ -942,6 +1002,7 @@ fn add_side_hold_records(
     records: &mut Vec<Record>,
     start: Position,
     end: Position,
+    checkpoints: &[Position],
     button: SideButton,
     channel: char,
     timing: &XlairTiming<'_>,
@@ -949,6 +1010,17 @@ fn add_side_hold_records(
     let (start_measure, start_tick) = output_position(start, timing)?;
     let (end_measure, end_tick) = output_position(end, timing)?;
     let lane = side_lane(button);
+    for checkpoint in checkpoints {
+        let (measure, tick) = output_position(*checkpoint, timing)?;
+        records.push(Record {
+            measure,
+            tick,
+            key: format!("2{}{channel}", base36_digit(lane)),
+            token: "31".to_owned(),
+            speed_group: None,
+            attributes: NoteAttributes::default(),
+        });
+    }
     records.push(Record {
         measure: start_measure,
         tick: start_tick,

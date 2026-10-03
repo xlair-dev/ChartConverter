@@ -640,6 +640,7 @@ fn writes_xlair_side_notes() {
             Lane::Side(SideButton::RightLower),
             NoteKind::Hold {
                 end: Position::new(2, 1).unwrap(),
+                checkpoints: Vec::new(),
             },
         )
         .unwrap(),
