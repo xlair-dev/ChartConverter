@@ -148,9 +148,11 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                 NoteKind::Hold { end, checkpoints } => match note.lane() {
                     Lane::Slider { start, width } => add_hold_records(
                         &mut records,
-                        note.position(),
-                        *end,
-                        checkpoints,
+                        HoldSpan {
+                            start: note.position(),
+                            end: *end,
+                            checkpoints,
+                        },
                         start,
                         width,
                         channel,
@@ -158,9 +160,11 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                     )?,
                     Lane::Side(button) => add_side_hold_records(
                         &mut records,
-                        note.position(),
-                        *end,
-                        checkpoints,
+                        HoldSpan {
+                            start: note.position(),
+                            end: *end,
+                            checkpoints,
+                        },
                         button,
                         channel,
                         &timing,
@@ -171,9 +175,11 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                 } => match note.lane() {
                     Lane::Slider { start, width } => add_hold_records(
                         &mut records,
-                        note.position(),
-                        *end,
-                        checkpoints,
+                        HoldSpan {
+                            start: note.position(),
+                            end: *end,
+                            checkpoints,
+                        },
                         start,
                         width,
                         channel,
@@ -181,9 +187,11 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                     )?,
                     Lane::Side(button) => add_side_hold_records(
                         &mut records,
-                        note.position(),
-                        *end,
-                        checkpoints,
+                        HoldSpan {
+                            start: note.position(),
+                            end: *end,
+                            checkpoints,
+                        },
                         button,
                         channel,
                         &timing,
@@ -956,19 +964,23 @@ struct XlairTiming<'a> {
     ticks_per_beat: u64,
 }
 
-fn add_hold_records(
-    records: &mut Vec<Record>,
+struct HoldSpan<'a> {
     start: Position,
     end: Position,
-    checkpoints: &[Position],
+    checkpoints: &'a [Position],
+}
+
+fn add_hold_records(
+    records: &mut Vec<Record>,
+    hold: HoldSpan<'_>,
     lane: u8,
     width: u8,
     channel: char,
     timing: &XlairTiming<'_>,
 ) -> Result<(), SusError> {
-    let (start_measure, start_tick) = output_position(start, timing)?;
-    let (end_measure, end_tick) = output_position(end, timing)?;
-    for checkpoint in checkpoints {
+    let (start_measure, start_tick) = output_position(hold.start, timing)?;
+    let (end_measure, end_tick) = output_position(hold.end, timing)?;
+    for checkpoint in hold.checkpoints {
         let (measure, tick) = output_position(*checkpoint, timing)?;
         records.push(Record {
             measure,
@@ -1000,17 +1012,15 @@ fn add_hold_records(
 
 fn add_side_hold_records(
     records: &mut Vec<Record>,
-    start: Position,
-    end: Position,
-    checkpoints: &[Position],
+    hold: HoldSpan<'_>,
     button: SideButton,
     channel: char,
     timing: &XlairTiming<'_>,
 ) -> Result<(), SusError> {
-    let (start_measure, start_tick) = output_position(start, timing)?;
-    let (end_measure, end_tick) = output_position(end, timing)?;
+    let (start_measure, start_tick) = output_position(hold.start, timing)?;
+    let (end_measure, end_tick) = output_position(hold.end, timing)?;
     let lane = side_lane(button);
-    for checkpoint in checkpoints {
+    for checkpoint in hold.checkpoints {
         let (measure, tick) = output_position(*checkpoint, timing)?;
         records.push(Record {
             measure,

@@ -528,7 +528,7 @@ fn maps_xlair_diagonal_air_to_side_button_taps() {
 
 #[test]
 fn suppresses_any_overlapping_xlair_tap_carrier() {
-    for carrier in ["t04", "x04", "f04"] {
+    for carrier in ["t04", "f04"] {
         let source = format!("@ENDHEAD\n#0'0:{carrier}\n#0'0:a04ULN");
         let chart = super::parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
 
@@ -539,6 +539,23 @@ fn suppresses_any_overlapping_xlair_tap_carrier() {
         );
         assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::Tap));
     }
+}
+
+#[test]
+fn keeps_xlair_side_ex_tap_as_a_directional_air_child_of_the_xtap() {
+    let source = "@ENDHEAD\n#0'0:x04\n#0'0:a04ULN";
+    let chart = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+
+    assert_eq!(chart.notes().len(), 2);
+    assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::XTap));
+    assert!(matches!(
+        chart.notes()[1].kind(),
+        NoteKind::Air {
+            properties,
+            parent,
+        } if properties.direction() == Some(chart::AirDirection::UpperLeft)
+            && *parent == chart::NoteId::new(0)
+    ));
 }
 
 #[test]

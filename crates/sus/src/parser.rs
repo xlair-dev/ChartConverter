@@ -1271,9 +1271,13 @@ impl Parser {
                 .copied()
                 .collect();
             if !paired_regions.is_empty() {
-                let side_note = self.chart.notes().iter().enumerate().find_map(
-                    |(index, existing)| {
-                        (existing.position() == note.position()
+                let side_note =
+                    self.chart
+                        .notes()
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, existing)| {
+                            (existing.position() == note.position()
                             && matches!(
                                 existing.lane(),
                                 Lane::Side(button)
@@ -1281,8 +1285,7 @@ impl Parser {
                             )
                             && matches!(existing.kind(), NoteKind::Tap(TapKind::Tap)))
                         .then_some(NoteId::new(index as u32))
-                    },
-                );
+                        });
                 let note_id = if let Some(note_id) = side_note {
                     self.chart
                         .replace_note(
