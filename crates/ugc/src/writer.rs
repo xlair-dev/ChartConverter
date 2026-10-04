@@ -359,19 +359,24 @@ fn write_non_air_note(
             )
         }
         NoteKind::Mine => format!("{prefix}d{}{}\n", encode_base36(lane), encode_base36(width)),
-        NoteKind::Hold { end } => {
-            let offset = relative_tick(note.position(), *end)?;
-            format!(
-                "{prefix}h{}{}\n#{}>s{}{}\n",
-                encode_base36(lane),
-                encode_base36(width),
-                offset,
-                encode_base36(lane),
-                encode_base36(width),
-            )
+        NoteKind::Hold { end, checkpoints } => {
+            let mut text = format!("{prefix}h{}{}\n", encode_base36(lane), encode_base36(width));
+            for checkpoint in checkpoints.iter().copied().chain(std::iter::once(*end)) {
+                let offset = relative_tick(note.position(), checkpoint)?;
+                text.push_str(&format!(
+                    "#{}>s{}{}\n",
+                    offset,
+                    encode_base36(lane),
+                    encode_base36(width),
+                ));
+            }
+            text
         }
-        NoteKind::ExHold { end, direction } => {
-            let offset = relative_tick(note.position(), *end)?;
+        NoteKind::ExHold {
+            end,
+            checkpoints,
+            direction,
+        } => {
             let direction = encode_ex_direction(*direction)?;
             let carrier = if include_ex_carrier {
                 format!(
@@ -383,14 +388,21 @@ fn write_non_air_note(
             } else {
                 String::new()
             };
-            format!(
-                "{carrier}{prefix}h{}{}\n#{}>s{}{}\n",
+            let mut text = format!(
+                "{carrier}{prefix}h{}{}\n",
                 encode_base36(lane),
-                encode_base36(width),
-                offset,
-                encode_base36(lane),
-                encode_base36(width),
-            )
+                encode_base36(width)
+            );
+            for checkpoint in checkpoints.iter().copied().chain(std::iter::once(*end)) {
+                let offset = relative_tick(note.position(), checkpoint)?;
+                text.push_str(&format!(
+                    "#{}>s{}{}\n",
+                    offset,
+                    encode_base36(lane),
+                    encode_base36(width),
+                ));
+            }
+            text
         }
         NoteKind::Slide { points } => {
             let mut text = format!("{prefix}s{}{}\n", encode_base36(lane), encode_base36(width));
@@ -465,19 +477,28 @@ fn write_air_note(note: &Note, prefix: &str) -> Result<String, UgcError> {
             ))
         }
         NoteKind::AirHold {
-            end, properties, ..
+            end,
+            checkpoints,
+            properties,
+            ..
         } => {
             let (lane, width) = central_lane(note.lane())?;
             let attributes = encode_air_attributes(*properties)?;
-            Ok(format!(
-                "{prefix}H{}{}{}\n#{}>s{}{}\n",
+            let mut text = format!(
+                "{prefix}H{}{}{}\n",
                 encode_base36(lane),
                 encode_base36(width),
-                attributes,
-                relative_tick(note.position(), *end)?,
-                encode_base36(lane),
-                encode_base36(width)
-            ))
+                attributes
+            );
+            for checkpoint in checkpoints.iter().copied().chain(std::iter::once(*end)) {
+                text.push_str(&format!(
+                    "#{}>s{}{}\n",
+                    relative_tick(note.position(), checkpoint)?,
+                    encode_base36(lane),
+                    encode_base36(width)
+                ));
+            }
+            Ok(text)
         }
         NoteKind::AirSlide { points, color, .. } => {
             if points.len() < 2 {
