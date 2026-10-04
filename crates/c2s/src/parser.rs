@@ -327,10 +327,14 @@ impl Parser {
             })?,
         )?;
         let kind = if self.mode == ChartMode::Xlair {
-            NoteKind::Hold { end }
+            NoteKind::Hold {
+                end,
+                checkpoints: Vec::new(),
+            }
         } else if let Some(field) = ex_direction_field {
             NoteKind::ExHold {
                 end,
+                checkpoints: Vec::new(),
                 direction: parse_ex_direction(
                     line,
                     fields
@@ -339,7 +343,10 @@ impl Parser {
                 )?,
             }
         } else {
-            NoteKind::Hold { end }
+            NoteKind::Hold {
+                end,
+                checkpoints: Vec::new(),
+            }
         };
         let id = self.add_note(line, Note::new(start, lane, kind))?;
         self.last_hold_parent = Some(id);
@@ -468,6 +475,7 @@ impl Parser {
                 lane,
                 NoteKind::AirHold {
                     end,
+                    checkpoints: Vec::new(),
                     properties,
                     parent,
                 },

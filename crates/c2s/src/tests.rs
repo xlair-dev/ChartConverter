@@ -163,7 +163,10 @@ fn writes_basic_and_extended_notes_and_round_trips_them() {
         Note::new(
             position,
             Lane::slider(12, 2).unwrap(),
-            NoteKind::Hold { end },
+            NoteKind::Hold {
+                end,
+                checkpoints: Vec::new(),
+            },
         )
         .unwrap(),
     );
@@ -346,6 +349,7 @@ fn writes_and_parses_ex_long_notes() {
             Lane::slider(0, 4).unwrap(),
             NoteKind::ExHold {
                 end,
+                checkpoints: Vec::new(),
                 direction: chart::ExDirection::Inward,
             },
         )

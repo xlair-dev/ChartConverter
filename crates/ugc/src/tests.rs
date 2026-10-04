@@ -25,7 +25,7 @@ fn parses_holds_with_implicit_end_lane() {
         .expect("valid UGC hold with an implicit end lane");
     assert!(matches!(
         chart.notes()[0].kind(),
-        NoteKind::Hold { end } if *end == Position::new(1, 1).unwrap()
+        NoteKind::Hold { end, .. } if *end == Position::new(1, 1).unwrap()
     ));
 }
 
@@ -191,6 +191,7 @@ fn parses_air_long_notes_after_their_parent() {
             end,
             properties,
             parent,
+            ..
         } if *end == Position::new(1, 1).unwrap()
             && *parent == chart::NoteId::new(0)
             && properties.direction().is_none()
@@ -223,7 +224,17 @@ fn writes_basic_notes_and_round_trips_them() {
         )
         .unwrap(),
     );
-    chart.add_note(Note::new(start, Lane::slider(0, 4).unwrap(), NoteKind::Hold { end }).unwrap());
+    chart.add_note(
+        Note::new(
+            start,
+            Lane::slider(0, 4).unwrap(),
+            NoteKind::Hold {
+                end,
+                checkpoints: Vec::new(),
+            },
+        )
+        .unwrap(),
+    );
 
     let ugc = write(&chart).expect("valid output");
     assert!(ugc.contains("@ENDHEAD"));
@@ -271,6 +282,7 @@ fn writes_and_parses_ex_long_carriers() {
             Lane::slider(0, 4).unwrap(),
             NoteKind::ExHold {
                 end: middle,
+                checkpoints: Vec::new(),
                 direction: chart::ExDirection::Inward,
             },
         )
@@ -433,6 +445,7 @@ fn writes_air_long_notes_and_round_trips_their_heights() {
             Lane::slider(0, 4).unwrap(),
             NoteKind::Hold {
                 end: Position::new(1, 1).unwrap(),
+                checkpoints: Vec::new(),
             },
         )
         .unwrap(),
@@ -443,6 +456,7 @@ fn writes_air_long_notes_and_round_trips_their_heights() {
             Lane::slider(0, 4).unwrap(),
             NoteKind::AirHold {
                 end: Position::new(1, 1).unwrap(),
+                checkpoints: Vec::new(),
                 properties: chart::AirProperties::without_direction()
                     .with_color(chart::AirColor::Inverted),
                 parent,
@@ -514,7 +528,7 @@ fn maps_xlair_diagonal_air_to_side_button_taps() {
 
 #[test]
 fn suppresses_any_overlapping_xlair_tap_carrier() {
-    for carrier in ["t04", "x04", "f04"] {
+    for carrier in ["t04", "f04"] {
         let source = format!("@ENDHEAD\n#0'0:{carrier}\n#0'0:a04ULN");
         let chart = super::parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
 
@@ -525,6 +539,23 @@ fn suppresses_any_overlapping_xlair_tap_carrier() {
         );
         assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::Tap));
     }
+}
+
+#[test]
+fn keeps_xlair_side_ex_tap_as_a_directional_air_child_of_the_xtap() {
+    let source = "@ENDHEAD\n#0'0:x04\n#0'0:a04ULN";
+    let chart = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+
+    assert_eq!(chart.notes().len(), 2);
+    assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::XTap));
+    assert!(matches!(
+        chart.notes()[1].kind(),
+        NoteKind::Air {
+            properties,
+            parent,
+        } if properties.direction() == Some(chart::AirDirection::UpperLeft)
+            && *parent == chart::NoteId::new(0)
+    ));
 }
 
 #[test]
@@ -574,10 +605,10 @@ fn parses_xlair_side_holds_as_side_button_notes() {
         ("12", chart::SideButton::LeftUpper),
         ("22", chart::SideButton::LeftLower),
         ("32", chart::SideButton::LeftLower),
-        ("c2", chart::SideButton::RightUpper),
-        ("d2", chart::SideButton::RightUpper),
-        ("e2", chart::SideButton::RightLower),
-        ("f1", chart::SideButton::RightLower),
+        ("c2", chart::SideButton::RightLower),
+        ("d2", chart::SideButton::RightLower),
+        ("e2", chart::SideButton::RightUpper),
+        ("f1", chart::SideButton::RightUpper),
     ] {
         let source = format!("@TICKS\t480\n@BEAT\t0\t4\t4\n@ENDHEAD\n#0'0:h{lane}\n#480>s{lane}\n");
         let chart = super::parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();

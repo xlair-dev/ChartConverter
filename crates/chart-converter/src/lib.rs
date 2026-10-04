@@ -361,7 +361,7 @@ mod tests {
         );
         assert_eq!(
             chart.notes()[1].lane(),
-            Lane::Side(chart::SideButton::RightUpper)
+            Lane::Side(chart::SideButton::RightLower)
         );
 
         let returned = super::convert_with_modes(
