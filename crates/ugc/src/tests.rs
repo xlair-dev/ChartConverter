@@ -626,6 +626,30 @@ fn parses_xlair_side_holds_as_side_button_notes() {
 }
 
 #[test]
+fn omits_slider_holds_in_xlair_mode() {
+    let source = concat!(
+        "@TICKS\t480\n",
+        "@ENDHEAD\n",
+        "#0'0:h02\n",
+        "#480>s02\n",
+        "#0'0:h44\n",
+        "#480>s44\n",
+    );
+
+    let xlair = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+    assert_eq!(xlair.notes().len(), 1);
+    assert_eq!(
+        xlair.notes()[0].lane(),
+        Lane::Side(chart::SideButton::LeftUpper)
+    );
+    assert!(matches!(xlair.notes()[0].kind(), NoteKind::Hold { .. }));
+
+    let normal = super::parse_with_mode(source, chart::ChartMode::Normal).unwrap();
+    assert_eq!(normal.notes().len(), 2);
+    assert!(matches!(normal.notes()[1].lane(), Lane::Slider { .. }));
+}
+
+#[test]
 fn keeps_a_slider_slide_that_overlaps_an_xlair_side_hold() {
     let source = concat!(
         "@TICKS\t480\n",

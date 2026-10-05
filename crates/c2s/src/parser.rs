@@ -313,6 +313,20 @@ impl Parser {
             fields.get(3).ok_or(C2sError::MalformedRecord { line })?,
             fields.get(4).ok_or(C2sError::MalformedRecord { line })?,
         )?;
+        let lane = if self.mode == ChartMode::Xlair {
+            match lane {
+                Lane::Slider { start, .. } => {
+                    let Some(button) = chart::SideButton::from_xlair_lane_start(start) else {
+                        report_loss("C2S", "slider hold in XLAIR mode");
+                        return Ok(());
+                    };
+                    Lane::Side(button)
+                }
+                Lane::Side(button) => Lane::Side(button),
+            }
+        } else {
+            lane
+        };
         let duration = parse_u64(
             line,
             fields.get(5).ok_or(C2sError::MalformedRecord { line })?,

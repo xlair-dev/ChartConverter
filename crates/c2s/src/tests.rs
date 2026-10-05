@@ -416,6 +416,27 @@ fn applies_xlair_mode_to_c2s_extended_long_notes() {
 }
 
 #[test]
+fn maps_xlair_c2s_holds_to_side_buttons_and_omits_slider_holds() {
+    let source = concat!(
+        "RESOLUTION\t384\n",
+        "HLD\t0\t0\t0\t2\t96\n",
+        "HLD\t0\t0\t4\t4\t96\n",
+    );
+    let xlair = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+
+    assert_eq!(xlair.notes().len(), 1);
+    assert_eq!(
+        xlair.notes()[0].lane(),
+        Lane::Side(chart::SideButton::LeftUpper)
+    );
+    assert!(matches!(xlair.notes()[0].kind(), NoteKind::Hold { .. }));
+
+    let normal = super::parse_with_mode(source, chart::ChartMode::Normal).unwrap();
+    assert_eq!(normal.notes().len(), 2);
+    assert_eq!(normal.notes()[1].lane(), Lane::slider(4, 4).unwrap());
+}
+
+#[test]
 fn omits_air_notes_in_xlair_mode() {
     let source = concat!(
         "RESOLUTION\t384\n",
