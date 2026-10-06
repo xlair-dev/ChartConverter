@@ -421,6 +421,18 @@ fn omits_damage_notes_in_xlair_mode() {
 }
 
 #[test]
+fn omits_standard_slider_holds_in_xlair_mode() {
+    let source = "#00140: 05000801E0";
+
+    let xlair = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+    assert!(xlair.notes().is_empty());
+
+    let normal = super::parse_with_mode(source, chart::ChartMode::Normal).unwrap();
+    assert_eq!(normal.notes().len(), 1);
+    assert!(matches!(normal.notes()[0].kind(), NoteKind::Hold { .. }));
+}
+
+#[test]
 fn omits_unsupported_tap_variants_in_xlair_mode() {
     let source = "#00010: 41 51 61";
     let xlair = super::parse_with_mode(source, chart::ChartMode::Xlair).unwrap();

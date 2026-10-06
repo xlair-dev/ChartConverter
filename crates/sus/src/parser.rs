@@ -442,6 +442,10 @@ impl Parser {
                 Note::new(position, lane, NoteKind::Mine)
                     .map_err(|source| SusError::Chart { line, source })?,
             ),
+            0x05 if self.mode == ChartMode::Xlair => {
+                report_loss("SUS", "slider hold in XLAIR mode");
+                Ok(())
+            }
             0x05 => self.parse_standard_hold(line, position, lane, data),
             0x06 => self.parse_standard_slide(line, position, lane, data),
             0x07 | 0x09 if self.mode == ChartMode::Xlair => {

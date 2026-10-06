@@ -780,9 +780,17 @@ impl Parser {
             }
             let hold_lane = if self.mode == ChartMode::Xlair {
                 match first_lane {
-                    Lane::Slider { start, .. } => SideButton::from_xlair_lane_start(start)
-                        .map(Lane::Side)
-                        .unwrap_or(first_lane),
+                    Lane::Slider { start, .. } => {
+                        let Some(button) = SideButton::from_xlair_lane_start(start) else {
+                            report_loss("UGC", "slider hold in XLAIR mode");
+                            return Ok(ParsedLongNote {
+                                consumed,
+                                note: None,
+                                air_points,
+                            });
+                        };
+                        Lane::Side(button)
+                    }
                     Lane::Side(_) => first_lane,
                 }
             } else {
