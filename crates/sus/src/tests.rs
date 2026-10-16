@@ -402,10 +402,7 @@ fn writes_basic_notes_and_timing() {
     assert!(sus.contains("#BPM01: 120"));
     assert!(sus.contains("#0001a:"));
     let parsed = parse(&sus).unwrap();
-    assert_eq!(
-        parsed.notes()[0].kind(),
-        &NoteKind::Tap(TapKind::XTap)
-    );
+    assert_eq!(parsed.notes()[0].kind(), &NoteKind::Tap(TapKind::XTap));
 }
 
 #[test]
@@ -511,7 +508,7 @@ fn preserves_speed_groups_on_standard_air_notes() {
 }
 
 #[test]
-fn writes_standard_sus_air_without_losing_the_parent_relation() {
+fn omits_air_that_standard_sus_cannot_represent() {
     let position = Position::new(1, 1).unwrap();
     let lane = Lane::slider(4, 4).unwrap();
     let mut chart = Chart::new();
@@ -529,11 +526,55 @@ fn writes_standard_sus_air_without_losing_the_parent_relation() {
         .expect("valid AIR"),
     );
     let source = write(&chart).expect("valid standard SUS output");
+    let parsed = parse(&source).expect("valid standard SUS output");
+    assert_eq!(parsed.notes().len(), 1);
+    assert!(!source.contains(": 07") && !source.contains(": 09"));
+}
+
+#[test]
+fn writes_standard_sus_holds_as_channel_events() {
+    let start = Position::new(0, 1).unwrap();
+    let end = Position::new(1, 1).unwrap();
+    let mut chart = Chart::new();
+    chart.add_note(
+        Note::new(
+            start,
+            Lane::slider(4, 4).unwrap(),
+            NoteKind::Hold {
+                end,
+                checkpoints: vec![],
+            },
+        )
+        .unwrap(),
+    );
+
+    let source = write(&chart).expect("valid standard SUS output");
+    assert!(source.contains("#000240:"));
+    assert_eq!(source.matches("#000240:").count(), 2);
     let parsed = parse(&source).expect("valid standard SUS round trip");
-    assert!(matches!(
-        parsed.notes()[1].kind(),
-        NoteKind::Air { parent, .. } if *parent == chart::NoteId::new(0)
-    ));
+    assert_eq!(parsed.notes(), chart.notes());
+}
+
+#[test]
+fn writes_standard_sus_slides_as_channel_events() {
+    let points = vec![
+        SlidePoint::new(Position::new(0, 1).unwrap(), Lane::slider(2, 3).unwrap()),
+        SlidePoint::new(Position::new(1, 1).unwrap(), Lane::slider(7, 2).unwrap()),
+    ];
+    let mut chart = Chart::new();
+    chart.add_note(
+        Note::new(
+            Position::new(0, 1).unwrap(),
+            Lane::slider(2, 3).unwrap(),
+            NoteKind::Slide { points },
+        )
+        .unwrap(),
+    );
+
+    let source = write(&chart).expect("valid standard SUS output");
+    assert_eq!(source.matches("#00032").count(), 1);
+    let parsed = parse(&source).expect("valid standard SUS round trip");
+    assert_eq!(parsed.notes(), chart.notes());
 }
 
 #[test]

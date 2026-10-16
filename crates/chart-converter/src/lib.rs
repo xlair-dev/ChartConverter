@@ -309,6 +309,33 @@ mod tests {
     }
 
     #[test]
+    fn converts_ugc_taps_holds_and_slides_to_standard_sus_channels() {
+        let source = concat!(
+            "@TICKS\t480\n",
+            "@BEAT\t0\t4\t4\n",
+            "@ENDHEAD\n",
+            "#0'0:t04\n",
+            "#0'480:h04\n",
+            "#960>s04\n",
+            "#1'0:s04\n",
+            "#960>s84\n",
+        );
+        let sus = convert(Format::Ugc, Format::Sus, source).expect("valid SUS output");
+        assert!(sus.contains("#0001"));
+        assert!(sus.contains("#0002"));
+        assert!(sus.contains("#0013"));
+        assert!(!sus.contains(": 05") && !sus.contains(": 06"));
+        let parsed = super::parse(Format::Sus, &sus).expect("spec channel rows parse as SUS");
+        assert_eq!(parsed.notes().len(), 3);
+        assert!(matches!(
+            parsed.notes()[0].kind(),
+            NoteKind::Tap(TapKind::Tap)
+        ));
+        assert!(matches!(parsed.notes()[1].kind(), NoteKind::Hold { .. }));
+        assert!(matches!(parsed.notes()[2].kind(), NoteKind::Slide { .. }));
+    }
+
+    #[test]
     fn parses_bom_marked_utf16_c2s() {
         let source = "RESOLUTION\t384\nTAP\t0\t0\t0\t4\n";
         let mut bytes = vec![0xff, 0xfe];
