@@ -190,10 +190,6 @@ pub struct CcChartView {
     pub tempo_count: usize,
     pub scrolls: *const CcScroll,
     pub scroll_count: usize,
-    /// Positive values start chart playback before audio; zero when absent.
-    pub audio_offset_seconds: f64,
-    /// Zero when the source specifies no base BPM.
-    pub base_bpm: f64,
 }
 
 struct OwnedChart {
@@ -201,8 +197,6 @@ struct OwnedChart {
     _points: Vec<Vec<CcPoint>>,
     tempos: Vec<CcTempo>,
     scrolls: Vec<CcScroll>,
-    audio_offset_seconds: f64,
-    base_bpm: f64,
 }
 
 impl From<Chart> for OwnedChart {
@@ -212,8 +206,6 @@ impl From<Chart> for OwnedChart {
             _points: Vec::new(),
             tempos: Vec::new(),
             scrolls: Vec::new(),
-            audio_offset_seconds: chart.audio_offset_seconds().unwrap_or(0.0),
-            base_bpm: chart.base_bpm().unwrap_or(0.0),
         };
         for (index, note) in chart.notes().iter().enumerate() {
             let mut points = Vec::new();
@@ -449,8 +441,6 @@ pub unsafe extern "C" fn cc_result_chart(result: *const CcResult) -> CcChartView
         tempo_count: chart.tempos.len(),
         scrolls: chart.scrolls.as_ptr(),
         scroll_count: chart.scrolls.len(),
-        audio_offset_seconds: chart.audio_offset_seconds,
-        base_bpm: chart.base_bpm,
     }
 }
 
