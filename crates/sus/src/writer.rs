@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use chart::{
-    Chart, ChartMode, ExDirection, Lane, MeasureTimeline, Note, NoteAttributes, NoteId, NoteKind,
-    Position, ScrollScope, SideButton, SlidePoint, SlidePointKind, TapKind, report_loss,
+    AirColor, AirDirection, Chart, ChartMode, ExDirection, Lane, MeasureTimeline, Note,
+    NoteAttributes, NoteId, NoteKind, Position, ScrollScope, SideButton, SlidePoint,
+    SlidePointKind, TapKind, report_loss,
 };
 
 use crate::{
@@ -893,10 +894,32 @@ fn write_standard_note(
                 )?);
             }
         }
-        NoteKind::Air { .. } => {
-            return Err(SusError::UnsupportedNote {
-                note: "AIR parent notation in standard SUS".to_owned(),
-            });
+        NoteKind::Air { properties, .. } => {
+            if properties.height().is_some() || properties.color() != AirColor::Normal {
+                report_loss("SUS", "AIR height or color");
+            }
+            let direction = match properties.direction() {
+                Some(AirDirection::Up) => '1',
+                Some(AirDirection::Down) => '2',
+                Some(AirDirection::UpperLeft) => '3',
+                Some(AirDirection::UpperRight) => '4',
+                Some(AirDirection::LowerLeft) => '5',
+                Some(AirDirection::LowerRight) => '6',
+                None => {
+                    return Err(SusError::UnsupportedNote {
+                        note: "directionless AIR in standard SUS".to_owned(),
+                    });
+                }
+            };
+            lines.push(standard_channel_line(
+                note.position(),
+                '5',
+                start,
+                direction,
+                width,
+                ticks_per_beat,
+                timeline,
+            )?);
         }
         NoteKind::AirHold { .. } => {
             return Err(SusError::UnsupportedNote {

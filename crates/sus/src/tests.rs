@@ -508,7 +508,7 @@ fn preserves_speed_groups_on_standard_air_notes() {
 }
 
 #[test]
-fn omits_air_that_standard_sus_cannot_represent() {
+fn writes_air_as_standard_sus_directional_notes() {
     let position = Position::new(1, 1).unwrap();
     let lane = Lane::slider(4, 4).unwrap();
     let mut chart = Chart::new();
@@ -527,8 +527,14 @@ fn omits_air_that_standard_sus_cannot_represent() {
     );
     let source = write(&chart).expect("valid standard SUS output");
     let parsed = parse(&source).expect("valid standard SUS output");
-    assert_eq!(parsed.notes().len(), 1);
-    assert!(!source.contains(": 07") && !source.contains(": 09"));
+    assert!(source.contains("#00054:"));
+    assert_eq!(parsed.notes().len(), 2);
+    assert_eq!(
+        parsed.notes()[1].kind(),
+        &NoteKind::ExTap {
+            direction: chart::ExDirection::Up
+        }
+    );
 }
 
 #[test]
