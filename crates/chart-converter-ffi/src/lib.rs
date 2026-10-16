@@ -180,6 +180,7 @@ pub struct CcScroll {
 }
 
 /// Borrowed arrays owned by a successful CcResult. Empty arrays may have null pointers.
+/// Tempo and scroll changes are stably sorted by their exact rational positions.
 #[repr(C)]
 #[derive(Default)]
 pub struct CcChartView {
@@ -334,42 +335,42 @@ impl From<Chart> for OwnedChart {
             });
             result._points.push(points);
         }
-        result
-            .tempos
-            .extend(chart.tempo_changes().iter().map(|tempo| CcTempo {
-                position: tempo.position().into(),
-                bpm: tempo.bpm(),
-            }));
-        result
-            .scrolls
-            .extend(chart.scroll_speed_changes().iter().map(|scroll| {
-                let (scope, target, lane) = match scroll.scope() {
-                    ScrollScope::Global => (
-                        CcScrollScope::Global,
-                        0,
-                        Lane::Side(chart::SideButton::LeftUpper),
-                    ),
-                    ScrollScope::Lane(lane) => (CcScrollScope::Lane, 0, lane),
-                    ScrollScope::Note(id) => (
-                        CcScrollScope::Note,
-                        id.value(),
-                        Lane::Side(chart::SideButton::LeftUpper),
-                    ),
-                    ScrollScope::Group(id) => (
-                        CcScrollScope::Group,
-                        id,
-                        Lane::Side(chart::SideButton::LeftUpper),
-                    ),
-                };
-                CcScroll {
-                    position: scroll.position().into(),
-                    speed: scroll.speed(),
-                    scope,
-                    target,
-                    lane: lane.into(),
-                    duration: scroll.duration().map(Into::into).unwrap_or_default(),
-                }
-            }));
+        let mut tempos = chart.tempo_changes().to_vec();
+        tempos.sort_by_key(|tempo| tempo.position());
+        result.tempos.extend(tempos.iter().map(|tempo| CcTempo {
+            position: tempo.position().into(),
+            bpm: tempo.bpm(),
+        }));
+        let mut scrolls = chart.scroll_speed_changes().to_vec();
+        scrolls.sort_by_key(|scroll| scroll.position());
+        result.scrolls.extend(scrolls.iter().map(|scroll| {
+            let (scope, target, lane) = match scroll.scope() {
+                ScrollScope::Global => (
+                    CcScrollScope::Global,
+                    0,
+                    Lane::Side(chart::SideButton::LeftUpper),
+                ),
+                ScrollScope::Lane(lane) => (CcScrollScope::Lane, 0, lane),
+                ScrollScope::Note(id) => (
+                    CcScrollScope::Note,
+                    id.value(),
+                    Lane::Side(chart::SideButton::LeftUpper),
+                ),
+                ScrollScope::Group(id) => (
+                    CcScrollScope::Group,
+                    id,
+                    Lane::Side(chart::SideButton::LeftUpper),
+                ),
+            };
+            CcScroll {
+                position: scroll.position().into(),
+                speed: scroll.speed(),
+                scope,
+                target,
+                lane: lane.into(),
+                duration: scroll.duration().map(Into::into).unwrap_or_default(),
+            }
+        }));
         result
     }
 }

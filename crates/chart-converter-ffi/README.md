@@ -36,6 +36,8 @@ void read_chart(const uint8_t *bytes, size_t length) {
   individual views or mutate them. Null is accepted by the getters and free function.
 - Positions are reduced rational absolute beat positions. Note IDs are stable insertion
   indices. Parent and note-scoped speed references use those same IDs.
+- Tempo and scroll changes are stably sorted by exact rational position before export;
+  changes at the same position retain their source order.
 - Holds expose start, explicit checkpoints, and end as path points. Slides expose their
   original visible, invisible, and control points. Sample timing and game judgement
   generation are the consumer's responsibility.
