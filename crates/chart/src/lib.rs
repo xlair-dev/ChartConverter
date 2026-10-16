@@ -29,7 +29,7 @@ pub enum ChartMode {
     Xlair,
 }
 
-/// Reports information omitted because a target format cannot represent it.
+/// Reports to stderr information omitted because a target format cannot represent it.
 pub fn report_loss(format: &str, detail: impl Display) {
-    println!("{format}: unsupported notation was omitted; information was lost: {detail}");
+    eprintln!("{format}: unsupported notation was omitted; information was lost: {detail}");
 }
