@@ -812,12 +812,14 @@ fn write_standard_note(
             events.push((*end, '2', start, width));
             for (position, token, lane, width) in events {
                 lines.push(standard_event_channel_line(
-                    position,
-                    '2',
-                    lane,
-                    channel,
-                    token,
-                    width,
+                    StandardChannelEvent {
+                        position,
+                        kind: '2',
+                        lane,
+                        channel,
+                        token,
+                        width,
+                    },
                     ticks_per_beat,
                     timeline,
                 )?);
@@ -839,12 +841,14 @@ fn write_standard_note(
             events.push((*end, '2', start, width));
             for (position, token, lane, width) in events {
                 lines.push(standard_event_channel_line(
-                    position,
-                    '2',
-                    lane,
-                    channel,
-                    token,
-                    width,
+                    StandardChannelEvent {
+                        position,
+                        kind: '2',
+                        lane,
+                        channel,
+                        token,
+                        width,
+                    },
                     ticks_per_beat,
                     timeline,
                 )?);
@@ -876,12 +880,14 @@ fn write_standard_note(
                     }
                 };
                 lines.push(standard_event_channel_line(
-                    point.position(),
-                    '3',
-                    point_lane,
-                    channel,
-                    token,
-                    point_width,
+                    StandardChannelEvent {
+                        position: point.position(),
+                        kind: '3',
+                        lane: point_lane,
+                        channel,
+                        token,
+                        width: point_width,
+                    },
                     ticks_per_beat,
                     timeline,
                 )?);
@@ -970,17 +976,21 @@ fn standard_timing_channel_line(
     ))
 }
 
-fn standard_event_channel_line(
+struct StandardChannelEvent {
     position: Position,
     kind: char,
     lane: u8,
     channel: char,
     token: char,
     width: u8,
+}
+
+fn standard_event_channel_line(
+    event: StandardChannelEvent,
     ticks_per_beat: u64,
     timeline: &MeasureTimeline,
 ) -> Result<String, SusError> {
-    let (measure, tick) = standard_position(position, ticks_per_beat, timeline)?;
+    let (measure, tick) = standard_position(event.position, ticks_per_beat, timeline)?;
     let tick = usize::try_from(tick).map_err(|_| SusError::UnrepresentablePosition)?;
     let slots = usize::try_from(
         timeline
@@ -992,11 +1002,13 @@ fn standard_event_channel_line(
         .checked_sub(tick + 1)
         .ok_or(SusError::UnrepresentablePosition)?;
     Ok(format!(
-        "#{measure:03}{kind}{}{channel}: {}{}{}{}",
-        base36_digit(lane),
+        "#{measure:03}{}{}{}: {}{}{}{}",
+        event.kind,
+        base36_digit(event.lane),
+        event.channel,
         "00".repeat(tick),
-        token,
-        base36_digit(width),
+        event.token,
+        base36_digit(event.width),
         "00".repeat(trailing),
     ))
 }
