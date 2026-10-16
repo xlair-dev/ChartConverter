@@ -386,8 +386,9 @@ pub struct CcResult {
 /// Always returns an owned result, including on invalid arguments or a caught panic.
 ///
 /// # Safety
-/// `source` must point to `length` readable bytes and remain valid for this call.
-/// A null source is allowed only when length is zero. Free the result exactly once.
+/// A non-null `source` must point to `length` readable bytes and remain valid for this call.
+/// Null with zero length is an empty input; null with nonzero length is rejected.
+/// Free the result exactly once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cc_parse(
     format: u32,
@@ -472,3 +473,6 @@ pub unsafe extern "C" fn cc_result_free(result: *mut CcResult) {
         drop(unsafe { Box::from_raw(result) });
     }
 }
+
+#[cfg(test)]
+mod tests;
