@@ -957,13 +957,10 @@ fn standard_channel_line(
     timeline: &MeasureTimeline,
 ) -> Result<String, SusError> {
     let (measure, tick) = standard_position(position, ticks_per_beat, timeline)?;
-    let tick = usize::try_from(tick).map_err(|_| SusError::UnrepresentablePosition)?;
-    let slots = usize::try_from(
-        timeline
-            .ticks(measure, ticks_per_beat)
-            .map_err(|_| SusError::UnrepresentablePosition)?,
-    )
-    .map_err(|_| SusError::UnrepresentablePosition)?;
+    let slots = timeline
+        .ticks(measure, ticks_per_beat)
+        .map_err(|_| SusError::UnrepresentablePosition)?;
+    let (tick, slots) = compact_data_position(tick, slots)?;
     let trailing = slots
         .checked_sub(tick + 1)
         .ok_or(SusError::UnrepresentablePosition)?;
@@ -984,13 +981,10 @@ fn standard_timing_channel_line(
     ticks_per_beat: u64,
     timeline: &MeasureTimeline,
 ) -> Result<String, SusError> {
-    let tick = usize::try_from(tick).map_err(|_| SusError::UnrepresentablePosition)?;
-    let slots = usize::try_from(
-        timeline
-            .ticks(measure, ticks_per_beat)
-            .map_err(|_| SusError::UnrepresentablePosition)?,
-    )
-    .map_err(|_| SusError::UnrepresentablePosition)?;
+    let slots = timeline
+        .ticks(measure, ticks_per_beat)
+        .map_err(|_| SusError::UnrepresentablePosition)?;
+    let (tick, slots) = compact_data_position(tick, slots)?;
     let trailing = slots
         .checked_sub(tick + 1)
         .ok_or(SusError::UnrepresentablePosition)?;
@@ -1016,13 +1010,10 @@ fn standard_event_channel_line(
     timeline: &MeasureTimeline,
 ) -> Result<String, SusError> {
     let (measure, tick) = standard_position(event.position, ticks_per_beat, timeline)?;
-    let tick = usize::try_from(tick).map_err(|_| SusError::UnrepresentablePosition)?;
-    let slots = usize::try_from(
-        timeline
-            .ticks(measure, ticks_per_beat)
-            .map_err(|_| SusError::UnrepresentablePosition)?,
-    )
-    .map_err(|_| SusError::UnrepresentablePosition)?;
+    let slots = timeline
+        .ticks(measure, ticks_per_beat)
+        .map_err(|_| SusError::UnrepresentablePosition)?;
+    let (tick, slots) = compact_data_position(tick, slots)?;
     let trailing = slots
         .checked_sub(tick + 1)
         .ok_or(SusError::UnrepresentablePosition)?;
@@ -1036,6 +1027,17 @@ fn standard_event_channel_line(
         base36_digit(event.width),
         "00".repeat(trailing),
     ))
+}
+
+/// Reduces a tick grid to the fewest SUS divisions that preserve the exact position.
+fn compact_data_position(tick: u64, slots: u64) -> Result<(usize, usize), SusError> {
+    if slots == 0 || tick >= slots {
+        return Err(SusError::UnrepresentablePosition);
+    }
+    let divisor = gcd(tick, slots);
+    let tick = usize::try_from(tick / divisor).map_err(|_| SusError::UnrepresentablePosition)?;
+    let slots = usize::try_from(slots / divisor).map_err(|_| SusError::UnrepresentablePosition)?;
+    Ok((tick, slots))
 }
 
 fn standard_ex_direction(direction: ExDirection) -> Result<char, SusError> {
@@ -1185,22 +1187,19 @@ fn add_slide_records(
 }
 
 fn format_record(record: &Record, timing: &XlairTiming<'_>) -> Result<String, SusError> {
-    let padding = usize::try_from(record.tick).map_err(|_| SusError::UnrepresentablePosition)?;
-    let slots = usize::try_from(
-        timing
-            .timeline
-            .ticks(record.measure, timing.ticks_per_beat)
-            .map_err(|_| SusError::UnrepresentablePosition)?,
-    )
-    .map_err(|_| SusError::UnrepresentablePosition)?;
+    let slots = timing
+        .timeline
+        .ticks(record.measure, timing.ticks_per_beat)
+        .map_err(|_| SusError::UnrepresentablePosition)?;
+    let (tick, slots) = compact_data_position(record.tick, slots)?;
     let trailing = slots
-        .checked_sub(padding + 1)
+        .checked_sub(tick + 1)
         .ok_or(SusError::UnrepresentablePosition)?;
     Ok(format!(
         "#{:03}{}: {}{}{}\n",
         record.measure,
         record.key,
-        "00".repeat(padding),
+        "00".repeat(tick),
         record.token,
         "00".repeat(trailing),
     ))
