@@ -281,7 +281,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
             .collect::<Vec<_>>();
         output.push_str(&format!(
             "#TIL{}: \"{}\"\n",
-            speed_group_text(group),
+            definition_id(group as usize)?,
             definitions.join(",")
         ));
     }
@@ -299,7 +299,9 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
         };
         if record.speed_group != current_speed_group {
             match record.speed_group {
-                Some(group) => output.push_str(&format!("#HISPEED {}\n", speed_group_text(group))),
+                Some(group) => {
+                    output.push_str(&format!("#HISPEED {}\n", definition_id(group as usize)?))
+                }
                 None => output.push_str("#NOSPEED\n"),
             }
             current_speed_group = record.speed_group;
@@ -308,7 +310,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
             if record.attributes.is_empty() {
                 output.push_str("#NOATTRIBUTE\n");
             } else {
-                let id = speed_group_text(attribute_index);
+                let id = definition_id(attribute_index as usize)?;
                 attribute_index = attribute_index
                     .checked_add(1)
                     .ok_or(SusError::UnrepresentablePosition)?;
@@ -391,7 +393,7 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
             .collect::<Vec<_>>();
         output.push_str(&format!(
             "#TIL{}: \"{}\"\n",
-            speed_group_text(group),
+            definition_id(group as usize)?,
             definitions.join(",")
         ));
     }
@@ -417,7 +419,7 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
         };
         if speed_group != current_speed_group {
             if let Some(group) = speed_group {
-                output.push_str(&format!("#HISPEED {}\n", speed_group_text(group)));
+                output.push_str(&format!("#HISPEED {}\n", definition_id(group as usize)?));
             } else if current_speed_group.is_some() {
                 output.push_str("#NOSPEED\n");
             }
@@ -430,7 +432,7 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
             if attributes.is_empty() {
                 output.push_str("#NOATTRIBUTE\n");
             } else {
-                let id = speed_group_text(attribute_index);
+                let id = definition_id(attribute_index as usize)?;
                 attribute_index = attribute_index
                     .checked_add(1)
                     .ok_or(SusError::UnrepresentablePosition)?;

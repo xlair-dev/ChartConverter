@@ -205,8 +205,8 @@ fn xlair_side_ex_taps_keep_the_xtap_parent_in_either_record_order() {
 #[test]
 fn xlair_side_tap_keeps_the_speed_group_of_its_own_record() {
     let source = concat!(
-        "#TIL00: \"0'0:0.50\"\n",
-        "#HISPEED 00\n",
+        "#TIL01: \"0'0:0.50\"\n",
+        "#HISPEED 01\n",
         "#00110: 11\n",
         "#NOSPEED\n",
         "#00150: 31",
@@ -337,7 +337,7 @@ fn parses_slide_two_channels() {
 
 #[test]
 fn parses_hispeed_definitions_and_applies_the_group_to_notes() {
-    let source = "#TIL00: \"0'0:0.50, 1'0:2.00\"\n#HISPEED 00\n#00110: 14";
+    let source = "#TIL01: \"0'0:0.50, 1'0:2.00\"\n#HISPEED 01\n#00110: 14";
     let chart = parse(source).expect("valid speed definition");
 
     assert_eq!(chart.scroll_speed_changes().len(), 2);
@@ -348,8 +348,14 @@ fn parses_hispeed_definitions_and_applies_the_group_to_notes() {
 }
 
 #[test]
+fn rejects_zero_as_a_sus_group_id() {
+    assert!(parse("#TIL00: \"0'0:1.0\"\n#HISPEED 00\n#00110: 14").is_err());
+    assert!(parse("#ATR00: \"rh: 1.5\"\n#ATTRIBUTE 00\n#00110: 14").is_err());
+}
+
+#[test]
 fn ignores_measure_line_speed_commands() {
-    let chart = parse("#MEASUREHS 00\n#REQUEST \"enable_priority true\"\n#00110: 14")
+    let chart = parse("#MEASUREHS 01\n#REQUEST \"enable_priority true\"\n#00110: 14")
         .expect("valid SUS display commands");
     assert_eq!(chart.notes().len(), 1);
     assert_eq!(chart.priority_enabled(), Some(true));
@@ -494,8 +500,8 @@ fn resolves_standard_sus_air_to_its_parent() {
 #[test]
 fn preserves_speed_groups_on_standard_air_notes() {
     let source = concat!(
-        "#TIL00: \"0'0:1.0\"\n",
-        "#HISPEED 00\n",
+        "#TIL01: \"0'0:1.0\"\n",
+        "#HISPEED 01\n",
         "#00000: 010008\n",
         "#00000: 070008\n",
     );
@@ -689,8 +695,8 @@ fn writes_speed_definitions_and_note_speed_groups() {
         .expect("valid note id");
 
     let sus = super::write_with_mode(&chart, chart::ChartMode::Xlair).expect("valid speed output");
-    assert!(sus.contains("#TIL0z: \"0'96:1.5\""));
-    assert!(sus.contains("#HISPEED 0z"));
+    assert!(sus.contains("#TIL10: \"0'96:1.5\""));
+    assert!(sus.contains("#HISPEED 10"));
     let parsed =
         super::parse_with_mode(&sus, chart::ChartMode::Xlair).expect("round-tripped speed output");
     assert_eq!(parsed.scroll_speed_changes(), chart.scroll_speed_changes());

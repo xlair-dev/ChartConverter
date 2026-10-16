@@ -699,9 +699,9 @@ impl Parser {
         if header.len() != 5 || !header.starts_with("ATR") {
             return Err(SusError::MalformedCommand { line });
         }
+        let id = parse_group(line, &header[3..])?.to_string();
         let attributes = parse_attributes(line, value.trim())?;
-        self.attribute_definitions
-            .insert(header[3..].to_owned(), attributes);
+        self.attribute_definitions.insert(id, attributes);
         Ok(())
     }
 
@@ -710,9 +710,10 @@ impl Parser {
         if fields.len() != 2 {
             return Err(SusError::MalformedCommand { line });
         }
+        let id = parse_group(line, fields[1])?.to_string();
         let attributes = self
             .attribute_definitions
-            .get(fields[1])
+            .get(&id)
             .copied()
             .ok_or_else(|| SusError::InvalidValue {
                 line,
@@ -1384,7 +1385,10 @@ fn parse_group(line: usize, value: &str) -> Result<u32, SusError> {
     }
     let high = u32::from(base36_byte(value.as_bytes()[0], line)?);
     let low = u32::from(base36_byte(value.as_bytes()[1], line)?);
-    Ok(high * 36 + low)
+    let group = high * 36 + low;
+    group
+        .checked_sub(1)
+        .ok_or(SusError::MalformedCommand { line })
 }
 
 fn parse_attributes(line: usize, value: &str) -> Result<NoteAttributes, SusError> {
