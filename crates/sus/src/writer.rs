@@ -58,7 +58,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {
         match output_position(tempo.position(), &timing) {
             Ok((measure, tick)) => {
-                let id = format!("{:02}", index + 1);
+                let id = definition_id(index)?;
                 bpm_definitions.push(format!("#BPM{id}: {}\n", tempo.bpm()));
                 records.push(Record {
                     measure,
@@ -372,7 +372,7 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
         definitions.sort_by_key(|(measure, tick, _)| (*measure, *tick));
     }
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {
-        let id = format!("{:02}", index + 1);
+        let id = definition_id(index)?;
         output.push_str(&format!("#BPM{id}: {}\n", tempo.bpm()));
         let (measure, tick) = standard_position(tempo.position(), ticks_per_beat, &timeline)?;
         output.push_str(&standard_timing_channel_line(
@@ -1259,6 +1259,15 @@ fn speed_group(group: u32) -> Result<u32, SusError> {
     } else {
         Err(SusError::UnrepresentablePosition)
     }
+}
+
+fn definition_id(index: usize) -> Result<String, SusError> {
+    let id = u32::try_from(index)
+        .ok()
+        .and_then(|index| index.checked_add(1))
+        .filter(|id| *id < 36 * 36)
+        .ok_or(SusError::UnrepresentablePosition)?;
+    Ok(speed_group_text(id))
 }
 
 fn speed_group_text(group: u32) -> String {
