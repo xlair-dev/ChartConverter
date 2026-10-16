@@ -11,4 +11,4 @@ chart = { path = "../chart" }
 chart-converter = { path = "../chart-converter" }
 
 [build-dependencies]
-cbindgen = "0.29"
+cbindgen = { version = "0.29", default-features = false }
