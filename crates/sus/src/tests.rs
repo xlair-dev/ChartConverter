@@ -32,6 +32,22 @@ fn preserves_variable_measure_lengths_when_writing_standard_sus() {
 }
 
 #[test]
+fn writes_standard_sus_taps_and_tempo_as_channel_data() {
+    let chart = parse("#REQUEST \"ticks_per_beat 480\"\n#BPM01: 120\n#00008: 0001\n#00010: 0012\n")
+        .expect("valid SUS");
+    let written = write(&chart).expect("valid standard SUS");
+
+    assert!(written.contains("#REQUEST \"ticks_per_beat "));
+    assert!(written.contains("08: "));
+    assert!(written.contains("10: "));
+    assert!(!written.contains("#00000: 08"));
+
+    let reparsed = parse(&written).expect("written SUS is valid");
+    assert_eq!(reparsed.tempo_changes(), chart.tempo_changes());
+    assert_eq!(reparsed.notes(), chart.notes());
+}
+
+#[test]
 fn preserves_variable_measure_lengths_when_writing_xlair_sus() {
     let chart = parse("#00102: 3\n#00210: 14").expect("valid SUS");
     let written = write_with_mode(&chart, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
@@ -384,13 +400,11 @@ fn writes_basic_notes_and_timing() {
 
     let sus = write(&chart).expect("valid output");
     assert!(sus.contains("#BPM01: 120"));
-    assert!(sus.contains("#00001: 02140C"));
+    assert!(sus.contains("#0001a:"));
     let parsed = parse(&sus).unwrap();
     assert_eq!(
         parsed.notes()[0].kind(),
-        &NoteKind::ExTap {
-            direction: chart::ExDirection::Up
-        }
+        &NoteKind::Tap(TapKind::XTap)
     );
 }
 

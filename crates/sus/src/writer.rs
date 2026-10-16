@@ -379,7 +379,13 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
         let id = format!("{:02}", index + 1);
         output.push_str(&format!("#BPM{id}: {}\n", tempo.bpm()));
         let (measure, tick) = standard_position(tempo.position(), ticks_per_beat, &timeline)?;
-        output.push_str(&format!("#{measure:02X}{tick:03X}: 08{id}\n"));
+        output.push_str(&standard_timing_channel_line(
+            measure,
+            tick,
+            &id,
+            ticks_per_beat,
+            &timeline,
+        )?);
     }
     for (group, definitions) in speed_definitions {
         let definitions = definitions
@@ -735,9 +741,9 @@ fn write_standard_note(
     let mut lines = Vec::new();
     match note.kind() {
         NoteKind::Tap(kind) => match kind {
-            TapKind::Tap => lines.push(format!("{prefix}: 01{lane_width}")),
-            TapKind::XTap => lines.push(format!("{prefix}: 02{lane_width}")),
-            TapKind::Flick { .. } => lines.push(format!("{prefix}: 03{lane_width}")),
+            TapKind::Tap => lines.push(standard_channel_line(note.position(), '1', start, '1', width, ticks_per_beat, timeline)?),
+            TapKind::XTap => lines.push(standard_channel_line(note.position(), '1', start, '2', width, ticks_per_beat, timeline)?),
+            TapKind::Flick { .. } => lines.push(standard_channel_line(note.position(), '1', start, '3', width, ticks_per_beat, timeline)?),
             TapKind::Tap4 => lines.push(standard_channel_line(
                 note.position(),
                 '1',
@@ -778,10 +784,10 @@ fn write_standard_note(
                     timeline,
                 )?);
             } else {
-                lines.push(format!("{prefix}: 02{lane_width}"));
+                lines.push(standard_channel_line(note.position(), '1', start, '2', width, ticks_per_beat, timeline)?);
             }
         }
-        NoteKind::Mine => lines.push(format!("{prefix}: 10{lane_width}")),
+        NoteKind::Mine => return Err(SusError::UnsupportedNote { note: "mine in standard SUS".to_owned() }),
         NoteKind::Hold { end, checkpoints }
         | NoteKind::ExHold {
             end, checkpoints, ..
@@ -932,6 +938,30 @@ fn standard_channel_line(
         "00".repeat(tick),
         token_kind,
         base36_digit(width),
+        "00".repeat(trailing),
+    ))
+}
+
+fn standard_timing_channel_line(
+    measure: u32,
+    tick: u64,
+    definition: &str,
+    ticks_per_beat: u64,
+    timeline: &MeasureTimeline,
+) -> Result<String, SusError> {
+    let tick = usize::try_from(tick).map_err(|_| SusError::UnrepresentablePosition)?;
+    let slots = usize::try_from(
+        timeline
+            .ticks(measure, ticks_per_beat)
+            .map_err(|_| SusError::UnrepresentablePosition)?,
+    )
+    .map_err(|_| SusError::UnrepresentablePosition)?;
+    let trailing = slots
+        .checked_sub(tick + 1)
+        .ok_or(SusError::UnrepresentablePosition)?;
+    Ok(format!(
+        "#{measure:03}08: {}{definition}{}\n",
+        "00".repeat(tick),
         "00".repeat(trailing),
     ))
 }
