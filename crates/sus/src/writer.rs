@@ -252,10 +252,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
             record.key.clone(),
         )
     });
-    let header_ticks = ticks_per_beat
-        .checked_mul(4)
-        .ok_or(SusError::UnrepresentablePosition)?;
-    let mut output = format!("#REQUEST \"ticks_per_beat {header_ticks}\"\n");
+    let mut output = format!("#REQUEST \"ticks_per_beat {ticks_per_beat}\"\n");
     if let Some(enabled) = chart.priority_enabled() {
         output.push_str(&format!(
             "#REQUEST \"enable_priority {}\"\n",
@@ -597,19 +594,9 @@ fn xlair_ticks_per_beat(chart: &Chart, timeline: &MeasureTimeline) -> Result<u64
                         .ok_or(SusError::UnrepresentablePosition)?,
                 )
                 .map_err(|_| SusError::UnrepresentablePosition)?;
-                let ratio = Position::new(
-                    offset
-                        .numerator()
-                        .checked_mul(length.denominator())
-                        .ok_or(SusError::UnrepresentablePosition)?,
-                    offset
-                        .denominator()
-                        .checked_mul(length.numerator())
-                        .ok_or(SusError::UnrepresentablePosition)?,
-                )
-                .map_err(|_| SusError::UnrepresentablePosition)?;
-                let required = ratio.denominator() / gcd(ratio.denominator(), 4);
-                ticks = lcm(ticks, required).ok_or(SusError::UnrepresentablePosition)?;
+                // The output tick is an offset in beats, not a fraction of a measure.
+                ticks =
+                    lcm(ticks, offset.denominator()).ok_or(SusError::UnrepresentablePosition)?;
                 return Ok(());
             }
             start = end;

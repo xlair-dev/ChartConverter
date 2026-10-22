@@ -6,6 +6,92 @@ use chart::{
 use super::{parse, write};
 
 #[test]
+fn parses_parent_ticks_consistently_with_follower_ticks_in_variable_meters() {
+    for numerator in [3, 5] {
+        for resolution in [480, 960] {
+            for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+                let source = format!(
+                    "@TICKS\t{resolution}\n@BEAT\t0\t{numerator}\t4\n@BPM\t0'{}\t150\n@TIL\t1\t0'{}\t2.0\n@ENDHEAD\n#0'{}:s04\n#{resolution}>s84\n",
+                    resolution / 2,
+                    resolution / 2,
+                    resolution / 2
+                );
+                let chart = super::parse_with_mode(&source, mode).expect("beat-based UGC ticks");
+                assert_eq!(chart.notes()[0].position(), Position::new(1, 2).unwrap());
+                assert_eq!(
+                    chart.tempo_changes()[0].position(),
+                    Position::new(1, 2).unwrap()
+                );
+                assert_eq!(
+                    chart.scroll_speed_changes()[0].position(),
+                    Position::new(1, 2).unwrap()
+                );
+                assert!(
+                    matches!(chart.notes()[0].kind(), NoteKind::Slide { points } if points.last().unwrap().position() == Position::new(3, 2).unwrap())
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn reads_header_timing_before_resolving_bpm_and_speed_positions() {
+    let chart = parse("@BPM\t1'480\t120\n@TIL\t1\t1'480\t2\n@SPDMOD\t1'480\t0.5\n@BEAT\t0\t3\t4\n@TICKS\t960\n@ENDHEAD\n#1'480:t04\n")
+        .expect("header timing declarations may follow their uses");
+    let position = Position::new(7, 2).unwrap();
+    assert_eq!(chart.notes()[0].position(), position);
+    assert_eq!(chart.tempo_changes()[0].position(), position);
+    assert!(
+        chart
+            .scroll_speed_changes()
+            .iter()
+            .all(|change| change.position() == position)
+    );
+}
+
+#[test]
+fn accepts_click_notes_without_lanes() {
+    let chart = parse("@ENDHEAD\n#0'0:c\n#0'480:t04\n").expect("CLICK does not have lane fields");
+    assert_eq!(chart.notes().len(), 1);
+    assert_eq!(chart.notes()[0].position(), Position::new(1, 1).unwrap());
+}
+
+#[test]
+fn skips_unsupported_long_notes_with_comments_and_directives() {
+    for kind in ["H04N", "S0400N", "C04000,480", "T0400"] {
+        let source = format!(
+            "@ENDHEAD\n#0'0:t04\n#0'0:{kind}\n'comment\n\n@USETIL\t2\n#480>s04\n'comment\n#960>s04\n#1'0:t84\n"
+        );
+        let chart = super::parse_with_mode(&source, chart::ChartMode::Xlair)
+            .expect("omitted long notes still consume their whole follower block");
+        assert_eq!(chart.notes().len(), 2);
+        assert_eq!(chart.notes()[1].lane(), Lane::slider(8, 4).unwrap());
+        assert_eq!(
+            chart.note_speed_group(chart::NoteId::new(1)).unwrap(),
+            Some(2)
+        );
+    }
+}
+
+#[test]
+fn preserves_audio_offsets_and_rejects_non_finite_values() {
+    for offset in [-0.5, 0.0, 1.25] {
+        let chart = parse(&format!("@BGMOFS\t{offset}\n@ENDHEAD\n")).expect("finite audio offset");
+        assert_eq!(chart.audio_offset_seconds(), Some(offset));
+    }
+    for invalid in ["NaN", "inf", "-inf"] {
+        assert!(parse(&format!("@BGMOFS\t{invalid}\n@ENDHEAD\n")).is_err());
+    }
+}
+
+#[test]
+fn keeps_nonzero_ticks_and_soffset_consistent_in_variable_meters() {
+    let chart = parse("@FLAG\tSOFFSET\tTRUE\n@BEAT\t0\t3\t4\n@ENDHEAD\n#0'480:t04\n")
+        .expect("SOFFSET shifts the correctly resolved beat position");
+    assert_eq!(chart.notes()[0].position(), Position::new(4, 1).unwrap());
+}
+
+#[test]
 fn parses_ugc_timing_and_basic_notes() {
     let source = "@TICKS\t480\n@BEAT\t0\t4\t4\n@BEAT\t2\t5\t4\n@BPM\t0'0\t120\n@ENDHEAD\n#1'480:t04\n#1'960:h04\n#480>s04\n#2'0:s04\n#960>s84\n";
     let chart = parse(source).expect("valid UGC");

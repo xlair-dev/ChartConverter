@@ -6,6 +6,94 @@ use chart::{
 use super::{parse, parse_with_mode, write, write_with_mode};
 
 #[test]
+fn parses_hispeed_ticks_as_beats_in_both_modes_and_variable_meters() {
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        for resolution in [480, 960] {
+            let source = format!(
+                "#REQUEST \"ticks_per_beat {resolution}\"\n#00002:3\n#00102:5\n#TIL01:\"0'{}:0.5, 0'{}:2.0, 1'{}:1.5\"\n",
+                resolution / 2,
+                resolution * 4,
+                resolution / 2,
+            );
+            let chart = parse_with_mode(&source, mode).expect("beat-based speed positions");
+            let positions: Vec<_> = chart
+                .scroll_speed_changes()
+                .iter()
+                .map(|change| change.position())
+                .collect();
+            assert_eq!(
+                positions,
+                vec![
+                    Position::new(1, 2).unwrap(),
+                    Position::new(4, 1).unwrap(),
+                    Position::new(7, 2).unwrap()
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn resolves_bpm_and_measure_definitions_before_note_positions() {
+    let chart =
+        parse("#00110:14\n#00008:0a\n#TIL01:\"1'240:2.0\"\n#BPM0A:120\n#BPM0a:60\n#00002:3\n")
+            .expect("definitions may follow their uses");
+    assert_eq!(chart.notes()[0].position(), Position::new(3, 1).unwrap());
+    assert_eq!(chart.tempo_changes()[0].bpm(), 60.0);
+    assert_eq!(
+        chart.scroll_speed_changes()[0].position(),
+        Position::new(7, 2).unwrap()
+    );
+}
+
+#[test]
+fn preserves_measure_base_while_collecting_later_measure_definitions() {
+    let chart = parse("#MEASUREBS 1\n#00110:14\n#00002:3\n#MEASUREBS 0\n#00102:5\n")
+        .expect("measure definitions use the base at their source line");
+    assert_eq!(chart.notes()[0].position(), Position::new(9, 1).unwrap());
+    assert_eq!(
+        chart.measure_lengths(),
+        &[(1, Position::new(5, 1).unwrap())]
+    );
+}
+
+#[test]
+fn resolves_mixed_case_hold_channels_in_musical_order() {
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        let source = "#TIL01:\"0'0:1.5\"\n#ATR01:\"pr:42\"\n#HISPEED 01\n#ATTRIBUTE 01\n#00220A:24\n#NOSPEED\n#NOATTRIBUTE\n#00120a:34\n#00020A:14\n";
+        let chart = parse_with_mode(source, mode).expect("unordered hold points");
+        assert_eq!(chart.notes().len(), 1);
+        assert_eq!(chart.notes()[0].position(), Position::new(0, 1).unwrap());
+        assert!(
+            matches!(chart.notes()[0].kind(), NoteKind::Hold { end, checkpoints } if *end == Position::new(8, 1).unwrap() && checkpoints == &[Position::new(4, 1).unwrap()])
+        );
+        assert_eq!(chart.note_speed_group(NoteId::new(0)).unwrap(), Some(0));
+        assert_eq!(chart.notes()[0].attributes().priority(), Some(42));
+    }
+    let slider = parse("#00130a:24\n#00030A:14\n").expect("mixed-case slide channel");
+    assert!(matches!(slider.notes()[0].kind(), NoteKind::Slide { .. }));
+}
+
+#[test]
+fn rejects_a_long_note_without_a_channel_without_panicking() {
+    for header in ["00020", "00030", "00040"] {
+        let result = std::panic::catch_unwind(|| parse(&format!("#{header}:14\n")));
+        assert!(result.expect("invalid data must return an error").is_err());
+    }
+}
+
+#[test]
+fn parses_inline_note_and_bpm_ticks_in_variable_meters() {
+    let chart = parse("#00002:3\n#BPM01:120\n#000F0:0801\n#000F0:010008\n")
+        .expect("inline ticks are beat-based too");
+    assert_eq!(chart.notes()[0].position(), Position::new(1, 2).unwrap());
+    assert_eq!(
+        chart.tempo_changes()[0].position(),
+        Position::new(1, 2).unwrap()
+    );
+}
+
+#[test]
 fn parses_short_notes_and_variable_measure_lengths() {
     let chart = parse("#00002: 3.5\n#00110: 12\n#00114: 0031\n").expect("valid SUS");
 
@@ -74,7 +162,7 @@ fn increases_xlair_resolution_for_fine_note_positions() {
     let written = write_with_mode(&chart, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
     let reparsed = parse_with_mode(&written, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
 
-    assert!(written.starts_with("#REQUEST \"ticks_per_beat 1920\""));
+    assert!(written.starts_with("#REQUEST \"ticks_per_beat 480\""));
     assert_eq!(reparsed.notes(), chart.notes());
 }
 
@@ -701,6 +789,38 @@ fn writes_speed_definitions_and_note_speed_groups() {
         super::parse_with_mode(&sus, chart::ChartMode::Xlair).expect("round-tripped speed output");
     assert_eq!(parsed.scroll_speed_changes(), chart.scroll_speed_changes());
     assert_eq!(parsed.note_speed_group(note_id).unwrap(), Some(35));
+}
+
+#[test]
+fn round_trips_fine_note_and_speed_ticks_in_variable_meters() {
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        for length in [Position::new(1, 1).unwrap(), Position::new(7, 2).unwrap()] {
+            let mut chart = Chart::new();
+            chart.set_measure_length(0, length).unwrap();
+            for position in [
+                Position::new(1, 128).unwrap(),
+                length.checked_add(Position::new(1, 128).unwrap()).unwrap(),
+            ] {
+                chart.add_tempo_change(TempoChange::new(position, 150.0).unwrap());
+                chart.add_scroll_speed_change(
+                    ScrollSpeedChange::with_scope(position, 1.5, ScrollScope::Group(0)).unwrap(),
+                );
+                chart.add_note(
+                    Note::new(
+                        position,
+                        Lane::slider(0, 4).unwrap(),
+                        NoteKind::Tap(TapKind::Tap),
+                    )
+                    .unwrap(),
+                );
+            }
+            let written = write_with_mode(&chart, mode).expect("fine beat-based ticks");
+            let parsed = parse_with_mode(&written, mode).expect("valid variable-meter output");
+            assert_eq!(parsed.tempo_changes(), chart.tempo_changes());
+            assert_eq!(parsed.scroll_speed_changes(), chart.scroll_speed_changes());
+            assert_eq!(parsed.notes(), chart.notes());
+        }
+    }
 }
 
 #[test]

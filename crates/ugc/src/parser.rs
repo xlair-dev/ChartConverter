@@ -44,6 +44,18 @@ impl Parser {
 
     fn parse(mut self, source: &str) -> Result<Chart, UgcError> {
         let lines: Vec<_> = source.lines().collect();
+        // Header declarations apply to every timestamp, regardless of whether
+        // BPM/TIL records precede BEAT/TICKS/FLAG in the file.
+        for (index, text) in lines.iter().enumerate() {
+            let text = text.trim();
+            if text == "@ENDHEAD" {
+                break;
+            }
+            let (tag, _) = split_directive(text)?;
+            if matches!(tag, "@TICKS" | "@BEAT" | "@FLAG") {
+                self.parse_header(index + 1, text)?;
+            }
+        }
         let mut index = 0;
         while index < lines.len() {
             let line_number = index + 1;
@@ -56,7 +68,10 @@ impl Parser {
                 if line == "@ENDHEAD" {
                     self.in_header = false;
                 } else if line.starts_with('@') {
-                    self.parse_header(line_number, line)?;
+                    let (tag, _) = split_directive(line)?;
+                    if !matches!(tag, "@TICKS" | "@BEAT" | "@FLAG") {
+                        self.parse_header(line_number, line)?;
+                    }
                 } else {
                     return Err(UgcError::MalformedRecord { line: line_number });
                 }
@@ -179,6 +194,13 @@ impl Parser {
                 let bpm = parse_speed(line, value)?;
                 self.chart
                     .set_base_bpm(bpm)
+                    .map_err(|source| UgcError::Chart { line, source })?;
+            }
+            "@BGMOFS" => {
+                // Like SUS WAVEOFFSET, positive values delay audio relative to the chart.
+                let seconds = parse_speed(line, value)?;
+                self.chart
+                    .set_audio_offset_seconds(seconds)
                     .map_err(|source| UgcError::Chart { line, source })?;
             }
             "@FLAG" => self.parse_flag(line, value)?,
@@ -332,6 +354,9 @@ impl Parser {
             .strip_prefix('#')
             .ok_or(UgcError::MalformedRecord { line })?;
         let (measure, tick) = parse_measure_tick(line, position_text)?;
+        if code == "c" {
+            return Ok((0, None));
+        }
         if code.len() < 3 {
             return Err(UgcError::MalformedRecord { line });
         }
@@ -375,10 +400,7 @@ impl Parser {
             'C' => self.parse_air_crush(line, position, &code[1..3], &code[3..], following),
             'T' => {
                 report_loss("UGC", "unsupported legacy T note was omitted");
-                let consumed = following
-                    .iter()
-                    .take_while(|follower| parse_follower(follower.trim()).is_some())
-                    .count();
+                let consumed = self.skip_followers(line, following)?;
                 Ok((consumed, None))
             }
             'c' => Ok((0, None)),
@@ -483,10 +505,7 @@ impl Parser {
     ) -> Result<(usize, Option<Note>), UgcError> {
         if self.mode == ChartMode::Xlair {
             report_loss("UGC", "AIR Crush notation in XLAIR mode");
-            let consumed = following
-                .iter()
-                .take_while(|follower| parse_follower(follower.trim()).is_some())
-                .count();
+            let consumed = self.skip_followers(line, following)?;
             return Ok((consumed, None));
         }
         let parent = self.last_parent.ok_or(UgcError::InvalidValue {
@@ -527,6 +546,10 @@ impl Parser {
         let mut consumed = 0;
         for follower in following {
             let follower = follower.trim();
+            if follower.is_empty() || follower.starts_with('\'') {
+                consumed += 1;
+                continue;
+            }
             if follower.starts_with('@') {
                 self.parse_directive(line + consumed + 1, follower)?;
                 consumed += 1;
@@ -624,10 +647,7 @@ impl Parser {
     ) -> Result<(usize, Option<Note>), UgcError> {
         if self.mode == ChartMode::Xlair {
             report_loss("UGC", "AIR long notation in XLAIR mode");
-            let consumed = following
-                .iter()
-                .take_while(|follower| parse_follower(follower.trim()).is_some())
-                .count();
+            let consumed = self.skip_followers(line, following)?;
             return Ok((consumed, None));
         }
         let parent = self.last_parent.ok_or(UgcError::InvalidValue {
@@ -818,22 +838,30 @@ impl Parser {
         })
     }
 
+    fn skip_followers(&mut self, line: usize, following: &[&str]) -> Result<usize, UgcError> {
+        for (index, text) in following.iter().enumerate() {
+            let text = text.trim();
+            if text.is_empty() || text.starts_with('\'') {
+                continue;
+            }
+            if text.starts_with('@') {
+                self.parse_directive(line + index + 1, text)?;
+            } else if parse_follower(text).is_none() {
+                return Ok(index);
+            }
+        }
+        Ok(following.len())
+    }
+
     fn position(&self, line: usize, measure: u32, tick: u64) -> Result<Position, UgcError> {
-        let ticks_per_measure =
-            self.ticks_per_beat
-                .checked_mul(4)
-                .ok_or_else(|| UgcError::InvalidValue {
-                    line,
-                    value: self.ticks_per_beat.to_string(),
-                })?;
         let position = self
             .timeline
-            .position(measure, tick, ticks_per_measure)
+            .position_from_ticks(measure, tick, self.ticks_per_beat)
             .map_err(|source| UgcError::Chart { line, source })?;
         if self.offset_measure {
             let offset = self
                 .timeline
-                .position(1, 0, ticks_per_measure)
+                .position(1, 0, 1)
                 .map_err(|source| UgcError::Chart { line, source })?;
             position
                 .checked_add(offset)
