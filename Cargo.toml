@@ -5,6 +5,7 @@ members = [
     "crates/chart",
     "crates/chart-converter",
     "crates/chart-converter-cli",
+    "crates/chart-converter-ffi",
     "crates/sus",
     "crates/ugc",
     "crates/xlair-sus-svg",
