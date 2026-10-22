@@ -215,21 +215,36 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
                     unreachable!("AIR notes are filtered before channel allocation");
                 }
             }
-            let speed_group = chart
-                .note_speed_group(chart::NoteId::new(note_index as u32))
-                .map_err(|_| SusError::UnrepresentablePosition)?
-                .map(speed_group)
-                .transpose()?;
-            let speed_group = match speed_group {
-                Some(group) if !speed_definitions.contains_key(&group) => {
-                    report_loss("SUS", format!("note speed group {group}"));
-                    None
-                }
-                speed_group => speed_group,
-            };
-            for record in &mut records[record_start..] {
-                record.speed_group = speed_group;
-                record.attributes = note.attributes();
+            let note_id = NoteId::new(note_index as u32);
+            for (record_index, record) in records[record_start..].iter_mut().enumerate() {
+                // Hold helpers emit checkpoints first, then start and end.
+                let count = note.point_metadata().len();
+                let point_index =
+                    if matches!(note.kind(), NoteKind::Hold { .. } | NoteKind::ExHold { .. }) {
+                        if record_index < count - 2 {
+                            record_index + 1
+                        } else if record_index == count - 2 {
+                            0
+                        } else {
+                            count - 1
+                        }
+                    } else {
+                        record_index
+                    };
+                let metadata = if count == 0 {
+                    chart::PointMetadata {
+                        speed_group: chart
+                            .note_speed_group(note_id)
+                            .map_err(|_| SusError::UnrepresentablePosition)?,
+                        attributes: note.attributes(),
+                    }
+                } else {
+                    chart
+                        .point_metadata(note_id, point_index)
+                        .map_err(|_| SusError::UnrepresentablePosition)?
+                };
+                record.speed_group = output_speed_group(chart, metadata.speed_group)?;
+                record.attributes = metadata.attributes;
             }
             Ok::<(), SusError>(())
         })();
@@ -282,9 +297,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
             definitions.join(",")
         ));
     }
-    let mut current_speed_group = None;
-    let mut current_attributes = NoteAttributes::default();
-    let mut attribute_index = 0u32;
+    let mut context = ContextWriter::default();
     for record in records {
         let text = match format_record(&record, &timing) {
             Ok(text) => text,
@@ -294,30 +307,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
             }
             Err(error) => return Err(error),
         };
-        if record.speed_group != current_speed_group {
-            match record.speed_group {
-                Some(group) => {
-                    output.push_str(&format!("#HISPEED {}\n", definition_id(group as usize)?))
-                }
-                None => output.push_str("#NOSPEED\n"),
-            }
-            current_speed_group = record.speed_group;
-        }
-        if record.attributes != current_attributes {
-            if record.attributes.is_empty() {
-                output.push_str("#NOATTRIBUTE\n");
-            } else {
-                let id = definition_id(attribute_index as usize)?;
-                attribute_index = attribute_index
-                    .checked_add(1)
-                    .ok_or(SusError::UnrepresentablePosition)?;
-                output.push_str(&format!(
-                    "#ATR{id}: \"{}\"\n#ATTRIBUTE {id}\n",
-                    format_attributes(record.attributes)
-                ));
-            }
-            current_attributes = record.attributes;
-        }
+        context.write(&mut output, record.speed_group, record.attributes)?;
         output.push_str(&text);
     }
     Ok(output)
@@ -394,55 +384,33 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
             definitions.join(",")
         ));
     }
-    let mut current_speed_group = None;
-    let mut current_attributes = NoteAttributes::default();
-    let mut attribute_index = 0u32;
+    let mut context = ContextWriter::default();
     let mut long_note_channels = vec![Vec::<(Position, Position)>::new(); 36];
     for note_id in standard_note_order(chart) {
-        let speed_group = chart
-            .note_speed_group(note_id)
-            .map_err(|_| SusError::UnrepresentablePosition)?
-            .map(speed_group)
-            .transpose()?;
-        let speed_group = match speed_group {
-            Some(group) if chart.scroll_speed_changes().iter().any(|change| {
-                matches!(change.scope(), ScrollScope::Group(candidate) if candidate == group)
-            }) => Some(group),
-            Some(group) => {
-                report_loss("SUS", format!("note speed group {group}"));
-                None
-            }
-            None => None,
-        };
-        if speed_group != current_speed_group {
-            if let Some(group) = speed_group {
-                output.push_str(&format!("#HISPEED {}\n", definition_id(group as usize)?));
-            } else if current_speed_group.is_some() {
-                output.push_str("#NOSPEED\n");
-            }
-            current_speed_group = speed_group;
-        }
-        let note = &chart.notes()[note_id.value() as usize];
+        let note = chart
+            .note(note_id)
+            .map_err(|_| SusError::UnrepresentablePosition)?;
         let channel = note_channel(note, &mut long_note_channels)?;
-        let attributes = note.attributes();
-        if attributes != current_attributes {
-            if attributes.is_empty() {
-                output.push_str("#NOATTRIBUTE\n");
-            } else {
-                let id = definition_id(attribute_index as usize)?;
-                attribute_index = attribute_index
-                    .checked_add(1)
-                    .ok_or(SusError::UnrepresentablePosition)?;
-                output.push_str(&format!(
-                    "#ATR{id}: \"{}\"\n#ATTRIBUTE {id}\n",
-                    format_attributes(attributes)
-                ));
-            }
-            current_attributes = attributes;
-        }
         match write_standard_note(note, ticks_per_beat, &timeline, channel) {
             Ok(lines) => {
-                for line in lines {
+                for (point_index, line) in lines.into_iter().enumerate() {
+                    let metadata = if note.point_metadata().is_empty() {
+                        chart::PointMetadata {
+                            speed_group: chart
+                                .note_speed_group(note_id)
+                                .map_err(|_| SusError::UnrepresentablePosition)?,
+                            attributes: note.attributes(),
+                        }
+                    } else {
+                        chart
+                            .point_metadata(note_id, point_index)
+                            .map_err(|_| SusError::UnrepresentablePosition)?
+                    };
+                    context.write(
+                        &mut output,
+                        output_speed_group(chart, metadata.speed_group)?,
+                        metadata.attributes,
+                    )?;
                     output.push_str(&line);
                     output.push('\n');
                 }
@@ -452,6 +420,63 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
         }
     }
     Ok(output)
+}
+
+#[derive(Default)]
+struct ContextWriter {
+    speed_group: Option<u32>,
+    attributes: NoteAttributes,
+    next_attribute: usize,
+}
+
+impl ContextWriter {
+    fn write(
+        &mut self,
+        output: &mut String,
+        group: Option<u32>,
+        attributes: NoteAttributes,
+    ) -> Result<(), SusError> {
+        if group != self.speed_group {
+            match group {
+                Some(group) => {
+                    output.push_str(&format!("#HISPEED {}\n", definition_id(group as usize)?))
+                }
+                None => output.push_str("#NOSPEED\n"),
+            }
+            self.speed_group = group;
+        }
+        if attributes != self.attributes {
+            if attributes.is_empty() {
+                output.push_str("#NOATTRIBUTE\n");
+            } else {
+                let id = definition_id(self.next_attribute)?;
+                self.next_attribute += 1;
+                output.push_str(&format!(
+                    "#ATR{id}: \"{}\"\n#ATTRIBUTE {id}\n",
+                    format_attributes(attributes)
+                ));
+            }
+            self.attributes = attributes;
+        }
+        Ok(())
+    }
+}
+
+fn output_speed_group(chart: &Chart, group: Option<u32>) -> Result<Option<u32>, SusError> {
+    let Some(group) = group else {
+        return Ok(None);
+    };
+    let group = speed_group(group)?;
+    if chart
+        .scroll_speed_changes()
+        .iter()
+        .any(|change| change.scope() == ScrollScope::Group(group) && change.duration().is_none())
+    {
+        Ok(Some(group))
+    } else {
+        report_loss("SUS", format!("note speed group {group}"));
+        Ok(None)
+    }
 }
 
 fn standard_note_order(chart: &Chart) -> Vec<NoteId> {

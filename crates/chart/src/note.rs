@@ -256,6 +256,14 @@ pub enum SlidePointKind {
     Invisible,
 }
 
+/// Complete rendering context captured at one long-note path point.
+/// A `None` speed group here explicitly disables group speed; it is not inheritance.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PointMetadata {
+    pub speed_group: Option<u32>,
+    pub attributes: NoteAttributes,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlidePoint {
     position: Position,
@@ -342,6 +350,8 @@ pub struct Note {
     lane: Lane,
     kind: NoteKind,
     attributes: NoteAttributes,
+    // None entries inherit the owning note's attributes and speed group.
+    point_metadata: Vec<Option<PointMetadata>>,
 }
 
 impl Note {
@@ -353,26 +363,22 @@ impl Note {
             NoteKind::Hold { end, checkpoints }
             | NoteKind::ExHold {
                 end, checkpoints, ..
-            } => {
-                if checkpoints
-                    .iter()
-                    .any(|point| *point <= position || *point >= *end)
-                    || checkpoints.windows(2).any(|pair| pair[0] >= pair[1])
-                {
-                    return Err(ChartError::InvalidHoldEnd);
-                }
+            } if checkpoints
+                .iter()
+                .any(|point| *point <= position || *point >= *end)
+                || checkpoints.windows(2).any(|pair| pair[0] >= pair[1]) =>
+            {
+                return Err(ChartError::InvalidHoldEnd);
             }
             NoteKind::AirHold {
                 end, checkpoints, ..
-            } => {
-                if *end <= position
-                    || checkpoints
-                        .iter()
-                        .any(|point| *point <= position || *point >= *end)
-                    || checkpoints.windows(2).any(|pair| pair[0] >= pair[1])
-                {
-                    return Err(ChartError::InvalidHoldEnd);
-                }
+            } if *end <= position
+                || checkpoints
+                    .iter()
+                    .any(|point| *point <= position || *point >= *end)
+                || checkpoints.windows(2).any(|pair| pair[0] >= pair[1]) =>
+            {
+                return Err(ChartError::InvalidHoldEnd);
             }
             NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => {
                 validate_slide(position, lane, points)?;
@@ -394,11 +400,20 @@ impl Note {
             _ => {}
         }
 
+        let point_count = match &kind {
+            NoteKind::Hold { checkpoints, .. }
+            | NoteKind::ExHold { checkpoints, .. }
+            | NoteKind::AirHold { checkpoints, .. } => checkpoints.len() + 2,
+            NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => points.len(),
+            NoteKind::AirSlide { points, .. } | NoteKind::AirCrush { points, .. } => points.len(),
+            _ => 0,
+        };
         Ok(Self {
             position,
             lane,
             kind,
             attributes: NoteAttributes::default(),
+            point_metadata: vec![None; point_count],
         })
     }
 
@@ -423,6 +438,23 @@ impl Note {
         self.attributes
     }
 
+    /// Path order is start, explicit checkpoints, end for holds, and stored path order for slides.
+    /// Short notes have no path points. None entries inherit the note-level rendering context.
+    pub fn point_metadata(&self) -> &[Option<PointMetadata>] {
+        &self.point_metadata
+    }
+
+    pub fn with_point_metadata(
+        mut self,
+        metadata: Vec<Option<PointMetadata>>,
+    ) -> Result<Self, ChartError> {
+        if metadata.len() != self.point_metadata.len() {
+            return Err(ChartError::InvalidPointMetadataCount);
+        }
+        self.point_metadata = metadata;
+        Ok(self)
+    }
+
     /// Appends a point to a slide while preserving its temporal invariants.
     pub fn append_slide_point(&mut self, point: SlidePoint) -> Result<(), ChartError> {
         let points = match &mut self.kind {
@@ -436,6 +468,7 @@ impl Note {
             return Err(ChartError::InvalidSlidePointOrder);
         }
         points.push(point);
+        self.point_metadata.push(None);
         Ok(())
     }
 
@@ -452,6 +485,7 @@ impl Note {
             return Err(ChartError::InvalidSlidePointOrder);
         }
         points.push(point);
+        self.point_metadata.push(None);
         Ok(())
     }
 }

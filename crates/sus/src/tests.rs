@@ -6,6 +6,81 @@ use chart::{
 use super::{parse, parse_with_mode, write, write_with_mode};
 
 #[test]
+fn preserves_each_slide_points_group_and_attributes_through_sus() {
+    let source = r#"#TIL01: "0'0:1.0"
+#TIL02: "0'0:2.0"
+#ATR01: "pr:10"
+#ATR02: "h:2.0"
+#HISPEED 01
+#ATTRIBUTE 01
+#00030A:14
+#HISPEED 02
+#ATTRIBUTE 02
+#00134A:44
+#NOSPEED
+#NOATTRIBUTE
+#00238A:54
+#HISPEED 01
+#0033CA:24
+"#;
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        let chart = parse_with_mode(source, mode).unwrap();
+        let id = NoteId::new(0);
+        assert_eq!(chart.note_speed_group(id).unwrap(), Some(0));
+        assert_eq!(
+            chart.point_metadata(id, 0).unwrap().attributes.priority(),
+            Some(10)
+        );
+        assert_eq!(chart.point_metadata(id, 1).unwrap().speed_group, Some(1));
+        assert_eq!(
+            chart.point_metadata(id, 1).unwrap().attributes.height(),
+            Some(2.0)
+        );
+        assert_eq!(
+            chart.point_metadata(id, 2).unwrap(),
+            chart::PointMetadata::default()
+        );
+        assert_eq!(chart.point_metadata(id, 3).unwrap().speed_group, Some(0));
+        let output = write_with_mode(&chart, mode).unwrap();
+        let restored = parse_with_mode(&output, mode).unwrap();
+        assert_eq!(restored.notes(), chart.notes());
+        for point in 0..4 {
+            assert_eq!(
+                restored.point_metadata(id, point).unwrap(),
+                chart.point_metadata(id, point).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn preserves_each_side_hold_points_group_through_sus() {
+    let source = "#TIL01:\"0'0:1\"\n#TIL02:\"0'0:2\"\n#HISPEED 01\n#00020A:14\n#HISPEED 02\n#00120A:34\n#NOSPEED\n#00220A:24\n";
+    let chart = parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+    let restored = parse_with_mode(
+        &write_with_mode(&chart, chart::ChartMode::Xlair).unwrap(),
+        chart::ChartMode::Xlair,
+    )
+    .unwrap();
+    for (point, group) in [Some(0), Some(1), None].into_iter().enumerate() {
+        assert_eq!(
+            chart
+                .point_metadata(NoteId::new(0), point)
+                .unwrap()
+                .speed_group,
+            group
+        );
+        assert_eq!(
+            restored
+                .point_metadata(NoteId::new(0), point)
+                .unwrap()
+                .speed_group,
+            group
+        );
+    }
+}
+
+#[test]
 fn keeps_warnings_when_a_later_sus_record_fails() {
     let report = super::parse_with_diagnostics("#00010:44\n#00010:xx\n", chart::ChartMode::Xlair);
     assert!(report.result.is_err());
@@ -76,8 +151,11 @@ fn resolves_mixed_case_hold_channels_in_musical_order() {
         assert!(
             matches!(chart.notes()[0].kind(), NoteKind::Hold { end, checkpoints } if *end == Position::new(8, 1).unwrap() && checkpoints == &[Position::new(4, 1).unwrap()])
         );
-        assert_eq!(chart.note_speed_group(NoteId::new(0)).unwrap(), Some(0));
-        assert_eq!(chart.notes()[0].attributes().priority(), Some(42));
+        assert_eq!(chart.note_speed_group(NoteId::new(0)).unwrap(), None);
+        assert_eq!(chart.notes()[0].attributes().priority(), None);
+        let end = chart.point_metadata(NoteId::new(0), 2).unwrap();
+        assert_eq!(end.speed_group, Some(0));
+        assert_eq!(end.attributes.priority(), Some(42));
     }
     let slider = parse("#00130a:24\n#00030A:14\n").expect("mixed-case slide channel");
     assert!(matches!(slider.notes()[0].kind(), NoteKind::Slide { .. }));

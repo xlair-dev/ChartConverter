@@ -12,9 +12,6 @@ pub(super) fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, 
     if chart.priority_enabled().is_some() {
         report_loss("UGC", "SUS enable_priority request");
     }
-    if chart.audio_offset_seconds().is_some() {
-        report_loss("UGC", "SUS WAVEOFFSET");
-    }
     let base_bpm = chart.base_bpm();
     let timeline = output_timeline(chart);
     let mut tempo_records = Vec::new();
@@ -31,7 +28,8 @@ pub(super) fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, 
     }
 
     let mut speed_records = Vec::new();
-    let mut speed_groups = BTreeSet::new();
+    // Timeline 0 exists even when no explicit speed changes are defined.
+    let mut speed_groups = BTreeSet::from([0]);
     for change in chart.scroll_speed_changes() {
         let record = (|| {
             if change.duration().is_some() {
@@ -96,6 +94,12 @@ pub(super) fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, 
     });
 
     let mut output = String::from("@VER\t8\n@EXVER\t1\n@TICKS\t480\n");
+    if let Some(offset) = chart.audio_offset_seconds() {
+        output.push_str(&format!("@BGMOFS\t{offset}\n"));
+    }
+    if let Some(group) = chart.main_speed_group() {
+        output.push_str(&format!("@MAINTIL\t{group}\n"));
+    }
     if let Some(base_bpm) = base_bpm {
         output.push_str(&format!("@MAINBPM\t{base_bpm}\n"));
     }
@@ -153,6 +157,17 @@ fn write_note(
     timeline: &MeasureTimeline,
 ) -> Result<OutputRecord, UgcError> {
     // XLAIR reuses UGC's diagonal AIR records for its side-device actions.
+    if chart
+        .note_speed_group(note_id)
+        .map_err(|_| UgcError::UnrepresentablePosition)?
+        .is_none()
+        && chart
+            .scroll_speed_changes()
+            .iter()
+            .any(|change| change.scope() == ScrollScope::Group(0) && change.speed() != 1.0)
+    {
+        report_loss("UGC", "no-speed note falls back to non-identity timeline 0");
+    }
     if !note.attributes().is_empty() {
         report_loss("UGC", "SUS note attributes");
     }
@@ -249,6 +264,7 @@ fn write_note(
             line: 0,
             value: "invalid note id".to_owned(),
         })?;
+    let text = write_point_groups(chart, note_id, note, text)?;
     Ok(OutputRecord {
         measure,
         tick,
@@ -258,6 +274,58 @@ fn write_note(
         speed_group,
         text,
     })
+}
+
+fn write_point_groups(
+    chart: &Chart,
+    note_id: NoteId,
+    note: &Note,
+    text: String,
+) -> Result<String, UgcError> {
+    if note.point_metadata().is_empty() {
+        return Ok(text);
+    }
+    let start_group = chart
+        .note_speed_group(note_id)
+        .map_err(|_| UgcError::UnrepresentablePosition)?
+        .unwrap_or(0);
+    let mut group = start_group;
+    let mut point = 0;
+    let mut output = String::new();
+    for line in text.lines() {
+        if line.starts_with('#') && line.contains('>') {
+            point += 1;
+            let context = chart
+                .point_metadata(note_id, point)
+                .map_err(|_| UgcError::UnrepresentablePosition)?;
+            if !context.attributes.is_empty() {
+                report_loss("UGC", "SUS per-point note attributes");
+            }
+            let next = context.speed_group.unwrap_or(0);
+            if context.speed_group.is_none()
+                && chart
+                    .scroll_speed_changes()
+                    .iter()
+                    .any(|change| change.scope() == ScrollScope::Group(0) && change.speed() != 1.0)
+            {
+                report_loss(
+                    "UGC",
+                    "no-speed point falls back to non-identity timeline 0",
+                );
+            }
+            if next != group {
+                output.push_str(&format!("@USETIL\t{next}\n"));
+                group = next;
+            }
+        }
+        output.push_str(line);
+        output.push('\n');
+    }
+    // Keep the outer writer's group state valid for the next parent record.
+    if group != start_group {
+        output.push_str(&format!("@USETIL\t{start_group}\n"));
+    }
+    Ok(output)
 }
 
 /// Encodes a side tap using a non-overlapping carrier tap and its diagonal AIR child.

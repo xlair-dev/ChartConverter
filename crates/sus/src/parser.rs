@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use chart::{
     AirDirection, AirProperties, Chart, ChartMode, Diagnostic, ExDirection, Lane, Note,
-    NoteAttributes, NoteId, NoteKind, ParseReport, Position, ScrollScope, ScrollSpeedChange,
-    SideButton, SlidePoint, SlidePointKind, TapKind, TempoChange,
+    NoteAttributes, NoteId, NoteKind, ParseReport, PointMetadata, Position, ScrollScope,
+    ScrollSpeedChange, SideButton, SlidePoint, SlidePointKind, TapKind, TempoChange,
 };
 
 use crate::{
@@ -26,6 +26,7 @@ pub(super) fn parse_with_diagnostics(source: &str, mode: ChartMode) -> ParseRepo
 
 struct PendingSlide {
     points: Vec<SlidePoint>,
+    metadata: Vec<PointMetadata>,
 }
 
 struct HoldEvent {
@@ -1166,11 +1167,15 @@ impl Parser {
                         channel,
                         PendingSlide {
                             points: vec![SlidePoint::new(position, lane)],
+                            metadata: vec![PointMetadata {
+                                speed_group: event.speed_group,
+                                attributes: event.attributes,
+                            }],
                         },
                     );
                 }
                 b'2' => {
-                    let pending = self
+                    let mut pending = self
                         .pending_holds
                         .remove(&channel)
                         .ok_or(SusError::MissingStart { line, channel })?;
@@ -1185,12 +1190,12 @@ impl Parser {
                                 .collect(),
                         },
                     )
-                    .map_err(|source| SusError::Chart { line, source })?
-                    .with_attributes(event.attributes);
-                    let note_id = self.chart.add_note(note);
-                    self.chart
-                        .set_note_speed_group(note_id, event.speed_group)
-                        .map_err(|source| SusError::Chart { line, source })?;
+                    .map_err(|source| SusError::Chart { line, source })?;
+                    pending.metadata.push(PointMetadata {
+                        speed_group: event.speed_group,
+                        attributes: event.attributes,
+                    });
+                    self.add_path_note(line, note, pending.metadata)?;
                 }
                 b'3' => {
                     let pending = self
@@ -1198,6 +1203,10 @@ impl Parser {
                         .get_mut(&channel)
                         .ok_or(SusError::MissingStart { line, channel })?;
                     pending.points.push(SlidePoint::new(position, lane));
+                    pending.metadata.push(PointMetadata {
+                        speed_group: event.speed_group,
+                        attributes: event.attributes,
+                    });
                 }
                 _ => unreachable!(),
             }
@@ -1252,11 +1261,15 @@ impl Parser {
                         event.channel,
                         PendingSlide {
                             points: vec![SlidePoint::new(event.position, event.lane)],
+                            metadata: vec![PointMetadata {
+                                speed_group: event.speed_group,
+                                attributes: event.attributes,
+                            }],
                         },
                     );
                 }
                 b'2' => {
-                    let pending = self.pending_sliders.remove(&event.channel).ok_or(
+                    let mut pending = self.pending_sliders.remove(&event.channel).ok_or(
                         SusError::MissingStart {
                             line: event.line,
                             channel: event.channel,
@@ -1270,15 +1283,12 @@ impl Parser {
                             .map_err(|source| SusError::Chart {
                                 line: event.line,
                                 source,
-                            })?
-                            .with_attributes(event.attributes);
-                    let note_id = self.chart.add_note(note);
-                    self.chart
-                        .set_note_speed_group(note_id, event.speed_group)
-                        .map_err(|source| SusError::Chart {
-                            line: event.line,
-                            source,
-                        })?;
+                            })?;
+                    pending.metadata.push(PointMetadata {
+                        speed_group: event.speed_group,
+                        attributes: event.attributes,
+                    });
+                    self.add_path_note(event.line, note, pending.metadata)?;
                 }
                 b'3'..=b'5' => {
                     let pending = self.pending_sliders.get_mut(&event.channel).ok_or(
@@ -1295,11 +1305,39 @@ impl Parser {
                     pending
                         .points
                         .push(SlidePoint::new(event.position, event.lane).with_kind(point_kind));
+                    pending.metadata.push(PointMetadata {
+                        speed_group: event.speed_group,
+                        attributes: event.attributes,
+                    });
                 }
                 _ => unreachable!(),
             }
         }
         Ok(())
+    }
+
+    fn add_path_note(
+        &mut self,
+        line: usize,
+        note: Note,
+        metadata: Vec<PointMetadata>,
+    ) -> Result<(), SusError> {
+        let start = *metadata
+            .first()
+            .ok_or(SusError::MalformedCommand { line })?;
+        let note = note
+            .with_attributes(start.attributes)
+            .with_point_metadata(
+                metadata
+                    .into_iter()
+                    .map(|point| (point != start).then_some(point))
+                    .collect(),
+            )
+            .map_err(|source| SusError::Chart { line, source })?;
+        let note_id = self.chart.add_note(note);
+        self.chart
+            .set_note_speed_group(note_id, start.speed_group)
+            .map_err(|source| SusError::Chart { line, source })
     }
 
     fn add_note(&mut self, line: usize, note: Note) -> Result<(), SusError> {

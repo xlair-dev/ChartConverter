@@ -38,4 +38,8 @@ pub enum ChartError {
     InvalidAirCrushInterval,
     #[error("note id does not refer to a note in the chart")]
     InvalidNoteId,
+    #[error("point metadata must contain one entry per path point")]
+    InvalidPointMetadataCount,
+    #[error("point index does not refer to a path point in the note")]
+    InvalidPointIndex,
 }

@@ -1,8 +1,8 @@
 use chart::{
     AirColor, AirCrushColor, AirCrushInterval, AirCrushPoint, AirDirection, AirPoint,
     AirProperties, Chart, ChartError, ChartMode, Diagnostic, ExDirection, Lane, MeasureTimeline,
-    Note, NoteId, NoteKind, ParseReport, Position, ScrollScope, ScrollSpeedChange, SideButton,
-    SlidePoint, SlidePointKind, TapKind, TempoChange,
+    Note, NoteId, NoteKind, ParseReport, PointMetadata, Position, ScrollScope, ScrollSpeedChange,
+    SideButton, SlidePoint, SlidePointKind, TapKind, TempoChange,
 };
 
 use crate::{UgcError, syntax::is_xlair_side_air_direction};
@@ -47,7 +47,7 @@ impl Parser {
             timeline: MeasureTimeline::new(Position::new(4, 1).unwrap()),
             chart: Chart::new(),
             in_header: true,
-            current_speed_group: None,
+            current_speed_group: Some(0),
             last_parent: None,
             offset_measure: false,
         }
@@ -94,6 +94,7 @@ impl Parser {
                 index += 1;
                 continue;
             }
+            let note_speed_group = self.current_speed_group;
             let (consumed, note) = self.parse_note(line_number, line, &lines[index + 1..])?;
             if let Some(note) = note {
                 if let Some((carrier_id, direction)) = self.ex_long_carrier(&note) {
@@ -104,7 +105,7 @@ impl Parser {
                     if self.has_air_child(carrier_id) {
                         let note_id = self.chart.add_note(note);
                         self.chart
-                            .set_note_speed_group(note_id, self.current_speed_group)
+                            .set_note_speed_group(note_id, note_speed_group)
                             .map_err(|source| UgcError::Chart {
                                 line: line_number,
                                 source,
@@ -113,6 +114,12 @@ impl Parser {
                     } else {
                         self.chart
                             .replace_note(carrier_id, note)
+                            .map_err(|source| UgcError::Chart {
+                                line: line_number,
+                                source,
+                            })?;
+                        self.chart
+                            .set_note_speed_group(carrier_id, note_speed_group)
                             .map_err(|source| UgcError::Chart {
                                 line: line_number,
                                 source,
@@ -129,7 +136,7 @@ impl Parser {
                     );
                     let note_id = self.chart.add_note(note);
                     self.chart
-                        .set_note_speed_group(note_id, self.current_speed_group)
+                        .set_note_speed_group(note_id, note_speed_group)
                         .map_err(|source| UgcError::Chart {
                             line: line_number,
                             source,
@@ -226,12 +233,7 @@ impl Parser {
             "@TIL" => self.parse_group_speed(line, value)?,
             "@SPDMOD" => self.parse_global_speed(line, value)?,
             "@MAINTIL" => {
-                if value != "0" {
-                    return Err(UgcError::UnsupportedRecord {
-                        line,
-                        record: tag.to_owned(),
-                    });
-                }
+                self.chart.set_main_speed_group(parse_u32(line, value)?);
             }
             "@USETIL" => self.parse_speed_group(line, value)?,
             _ => {}
@@ -298,7 +300,7 @@ impl Parser {
 
     fn parse_speed_group(&mut self, line: usize, value: &str) -> Result<(), UgcError> {
         let group = parse_u32(line, value)?;
-        self.current_speed_group = (group != 0).then_some(group);
+        self.current_speed_group = Some(group);
         Ok(())
     }
 
@@ -570,6 +572,7 @@ impl Parser {
             AirCrushPoint::new(position, lane, height)
                 .map_err(|source| UgcError::Chart { line, source })?,
         ];
+        let mut metadata = vec![self.current_point_metadata()];
         let mut consumed = 0;
         for follower in following {
             let follower = follower.trim();
@@ -585,6 +588,7 @@ impl Parser {
             let Some((offset, data)) = parse_follower(follower) else {
                 break;
             };
+            metadata.push(self.current_point_metadata());
             if data == "s" {
                 let endpoint =
                     position
@@ -660,6 +664,7 @@ impl Parser {
             },
         )
         .map_err(|source| UgcError::Chart { line, source })?;
+        let note = self.attach_point_metadata(line, note, metadata)?;
         Ok((consumed, Some(note)))
     }
 
@@ -715,6 +720,7 @@ impl Parser {
             _ => return Err(UgcError::MalformedRecord { line }),
         };
         let note = Note::new(note.position(), note.lane(), note_kind)
+            .and_then(|air| air.with_point_metadata(note.point_metadata().to_vec()))
             .map_err(|source| UgcError::Chart { line, source })?;
         Ok((consumed, Some(note)))
     }
@@ -730,6 +736,7 @@ impl Parser {
     ) -> Result<ParsedLongNote, UgcError> {
         let start_lane = parse_lane(line, start_code)?;
         let mut points = vec![SlidePoint::new(position, start_lane)];
+        let mut metadata = vec![self.current_point_metadata()];
         let mut consumed = 0;
         let mut air_points = if kind == 's' && air_start_height.is_some() {
             let height = air_start_height.ok_or(UgcError::MalformedRecord { line })?;
@@ -754,6 +761,7 @@ impl Parser {
             let Some((offset, data)) = parse_follower(follower) else {
                 break;
             };
+            metadata.push(self.current_point_metadata());
             if kind == 'h' && (data == "s" || data == "c") {
                 let endpoint =
                     position
@@ -866,11 +874,35 @@ impl Parser {
             Note::new(position, start_lane, NoteKind::Slide { points })
         }
         .map_err(|source| UgcError::Chart { line, source })?;
+        let note = self.attach_point_metadata(line, note, metadata)?;
         Ok(ParsedLongNote {
             consumed,
             note: Some(note),
             air_points,
         })
+    }
+
+    fn current_point_metadata(&self) -> PointMetadata {
+        PointMetadata {
+            speed_group: self.current_speed_group,
+            ..PointMetadata::default()
+        }
+    }
+
+    fn attach_point_metadata(
+        &self,
+        line: usize,
+        note: Note,
+        metadata: Vec<PointMetadata>,
+    ) -> Result<Note, UgcError> {
+        let start = *metadata.first().ok_or(UgcError::MalformedRecord { line })?;
+        note.with_point_metadata(
+            metadata
+                .into_iter()
+                .map(|point| (point != start).then_some(point))
+                .collect(),
+        )
+        .map_err(|source| UgcError::Chart { line, source })
     }
 
     fn skip_followers(&mut self, line: usize, following: &[&str]) -> Result<usize, UgcError> {
@@ -919,7 +951,9 @@ fn ex_long_note(note: Note, direction: ExDirection) -> Result<Note, ChartError> 
         NoteKind::Slide { points } => NoteKind::ExSlide { points, direction },
         _ => unreachable!("ExLong conversion requires a hold or slide"),
     };
-    Note::new(position, lane, kind)
+    Note::new(position, lane, kind)?
+        .with_attributes(note.attributes())
+        .with_point_metadata(note.point_metadata().to_vec())
 }
 
 fn split_directive(line: &str) -> Result<(&str, &str), UgcError> {

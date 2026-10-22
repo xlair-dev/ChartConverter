@@ -73,6 +73,12 @@ pub(super) fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, 
         }
     }
     for (index, note) in chart.notes().iter().enumerate() {
+        if note.point_metadata().iter().any(Option::is_some) {
+            report_loss(
+                "C2S",
+                "per-point rendering context; SLA applies to an entire note",
+            );
+        }
         let record_start = records.len();
         match write_note(chart, index, note, &mut records, &speed_groups, mode) {
             Ok(()) => {}
