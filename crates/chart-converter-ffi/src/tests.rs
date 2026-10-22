@@ -205,7 +205,7 @@ fn exports_resolved_point_context_without_changing_legacy_paths() {
 #HISPEED 02
 #ATR01:"pr:12"
 #ATTRIBUTE 01
-#00134A:44
+#00134A:34
 #NOSPEED
 #NOATTRIBUTE
 #00238A:24
@@ -227,7 +227,7 @@ fn exports_resolved_point_context_without_changing_legacy_paths() {
     assert!(!points[2].attributes.priority.has_value);
     assert!(matches!(
         unsafe { &*note.points.add(1) }.kind,
-        CcPointKind::Control
+        CcPointKind::Visible
     ));
 }
 

@@ -909,7 +909,8 @@ fn write_standard_note(
                 } else {
                     match point.kind() {
                         SlidePointKind::Visible => '3',
-                        SlidePointKind::Control => '4',
+                        // IR controls are on-path points, not SUS Bezier handles.
+                        SlidePointKind::Control => '5',
                         SlidePointKind::Invisible => '5',
                     }
                 };
@@ -1201,7 +1202,7 @@ fn add_slide_records(
         } else {
             match point.kind() {
                 SlidePointKind::Visible => '3',
-                SlidePointKind::Control => '4',
+                SlidePointKind::Control => '5',
                 SlidePointKind::Invisible => '5',
             }
         };

@@ -8,9 +8,21 @@
 //! `REQUEST "xlair_directional_mode consume_tap"` opts into exact Tap 1 carrier matching;
 //! `independent` preserves ordinary taps. Without a request, existing overlap rules apply.
 //! Side XTap pairs always retain their existing XTap-parent / directional-AIR-child IR.
+//!
+//! SUS token 4 is a Bezier handle, unlike the shared IR's on-path `Control`.
+//! Parsing expands these handles with 20 subdivisions per second, using the
+//! chart's tempo map (default BPM 120), and outward u8 lane rounding. Generated
+//! positions use a bounded 480-tick beat grid, independent of the source
+//! `ticks_per_beat` request; geometry is evaluated at the generated time after
+//! rounding. Authored anchors are kept exact.
+//! Generated points are `Control` (non-checkpoints), inherit the preceding
+//! anchor's context, and can be joined directly like UGC/C2S paths. Writing emits
+//! on-path Control/Invisible points as token 5, never as new Bezier handles.
+//! This is a bounded geometric approximation, not lossless authoring round-trip.
 
 use chart::{Chart, ChartMode};
 
+mod curve;
 mod error;
 mod parser;
 mod syntax;
@@ -47,3 +59,6 @@ pub fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, SusErro
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod curve_tests;

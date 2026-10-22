@@ -7,7 +7,7 @@ use chart::{
 };
 
 use crate::{
-    SusError,
+    SusError, curve,
     syntax::{note_end_position, standard_parent_code},
 };
 
@@ -1347,6 +1347,12 @@ impl Parser {
     fn resolve_sliders(&mut self) -> Result<(), SusError> {
         self.slider_events
             .sort_by_key(|event| (event.position, event.line));
+        let timing = self
+            .slider_events
+            .iter()
+            .find(|event| event.kind == b'4')
+            .map(|event| curve::Timing::new(self.chart.tempo_changes(), event.line))
+            .transpose()?;
         for event in std::mem::take(&mut self.slider_events) {
             match event.kind {
                 b'1' => {
@@ -1376,6 +1382,15 @@ impl Parser {
                     )?;
                     let mut points = pending.points;
                     points.push(SlidePoint::new(event.position, event.lane));
+                    pending.metadata.push(PointMetadata {
+                        speed_group: event.speed_group,
+                        attributes: event.attributes,
+                    });
+                    let (points, metadata) = if let Some(timing) = &timing {
+                        curve::expand(points, pending.metadata, timing, event.line)?
+                    } else {
+                        (points, pending.metadata)
+                    };
                     let start = points[0].clone();
                     let note =
                         Note::new(start.position(), start.lane(), NoteKind::Slide { points })
@@ -1383,11 +1398,7 @@ impl Parser {
                                 line: event.line,
                                 source,
                             })?;
-                    pending.metadata.push(PointMetadata {
-                        speed_group: event.speed_group,
-                        attributes: event.attributes,
-                    });
-                    self.add_path_note(event.line, note, pending.metadata)?;
+                    self.add_path_note(event.line, note, metadata)?;
                 }
                 b'3'..=b'5' => {
                     let pending = self.pending_sliders.get_mut(&event.channel).ok_or(

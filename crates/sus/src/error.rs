@@ -15,6 +15,8 @@ pub enum SusError {
     MissingStart { line: usize, channel: char },
     #[error("channel `{channel}` has no end point")]
     MissingEnd { channel: char },
+    #[error("line {line}: cannot expand SUS Bezier curve: {reason}")]
+    InvalidCurve { line: usize, reason: &'static str },
     #[error("cannot represent `{note}` in the supported SUS output")]
     UnsupportedNote { note: String },
     #[error("position cannot be represented at the SUS resolution")]
@@ -28,7 +30,8 @@ impl SusError {
             | Self::InvalidValue { line, .. }
             | Self::UnsupportedCommand { line, .. }
             | Self::Chart { line, .. }
-            | Self::MissingStart { line, .. } => Some(*line),
+            | Self::MissingStart { line, .. }
+            | Self::InvalidCurve { line, .. } => Some(*line),
             _ => None,
         }
     }
