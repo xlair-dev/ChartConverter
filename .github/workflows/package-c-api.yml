@@ -10,6 +10,7 @@ on:
       - Cargo.toml
       - crates/**
       - scripts/package-c-api.py
+      - scripts/test_package_c_api.py
       - rust-toolchain.toml
       - .github/workflows/package-c-api.yml
 
@@ -57,6 +58,9 @@ jobs:
 
       - name: Fetch dependencies
         run: cargo fetch --locked --target "${{ matrix.target }}"
+
+      - name: Test package helpers
+        run: python -B -m unittest discover -s scripts -p test_package_c_api.py
 
       - name: Package static library
         if: runner.os == 'Windows'

@@ -18,6 +18,11 @@ pub fn parse_with_mode(source: &str, mode: ChartMode) -> Result<Chart, C2sError>
     parser::parse(source, mode)
 }
 
+/// Parses without printing warnings; diagnostics also survive a parse failure.
+pub fn parse_with_diagnostics(source: &str, mode: ChartMode) -> chart::ParseReport<C2sError> {
+    parser::parse_with_diagnostics(source, mode)
+}
+
 /// Writes the representable shared chart model as a C2S document.
 ///
 /// Unsupported or unrepresentable chart information is omitted and reported to stdout.

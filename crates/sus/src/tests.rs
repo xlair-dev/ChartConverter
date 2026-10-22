@@ -6,6 +6,90 @@ use chart::{
 use super::{parse, parse_with_mode, write, write_with_mode};
 
 #[test]
+fn preserves_each_slide_points_group_and_attributes_through_sus() {
+    let source = r#"#TIL01: "0'0:1.0"
+#TIL02: "0'0:2.0"
+#ATR01: "pr:10"
+#ATR02: "h:2.0"
+#HISPEED 01
+#ATTRIBUTE 01
+#00030A:14
+#HISPEED 02
+#ATTRIBUTE 02
+#00134A:44
+#NOSPEED
+#NOATTRIBUTE
+#00238A:54
+#HISPEED 01
+#0033CA:24
+"#;
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        let chart = parse_with_mode(source, mode).unwrap();
+        let id = NoteId::new(0);
+        assert_eq!(chart.note_speed_group(id).unwrap(), Some(0));
+        assert_eq!(
+            chart.point_metadata(id, 0).unwrap().attributes.priority(),
+            Some(10)
+        );
+        assert_eq!(chart.point_metadata(id, 1).unwrap().speed_group, Some(1));
+        assert_eq!(
+            chart.point_metadata(id, 1).unwrap().attributes.height(),
+            Some(2.0)
+        );
+        assert_eq!(
+            chart.point_metadata(id, 2).unwrap(),
+            chart::PointMetadata::default()
+        );
+        assert_eq!(chart.point_metadata(id, 3).unwrap().speed_group, Some(0));
+        let output = write_with_mode(&chart, mode).unwrap();
+        let restored = parse_with_mode(&output, mode).unwrap();
+        assert_eq!(restored.notes(), chart.notes());
+        for point in 0..4 {
+            assert_eq!(
+                restored.point_metadata(id, point).unwrap(),
+                chart.point_metadata(id, point).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn preserves_each_side_hold_points_group_through_sus() {
+    let source = "#TIL01:\"0'0:1\"\n#TIL02:\"0'0:2\"\n#HISPEED 01\n#00020A:14\n#HISPEED 02\n#00120A:34\n#NOSPEED\n#00220A:24\n";
+    let chart = parse_with_mode(source, chart::ChartMode::Xlair).unwrap();
+    let restored = parse_with_mode(
+        &write_with_mode(&chart, chart::ChartMode::Xlair).unwrap(),
+        chart::ChartMode::Xlair,
+    )
+    .unwrap();
+    for (point, group) in [Some(0), Some(1), None].into_iter().enumerate() {
+        assert_eq!(
+            chart
+                .point_metadata(NoteId::new(0), point)
+                .unwrap()
+                .speed_group,
+            group
+        );
+        assert_eq!(
+            restored
+                .point_metadata(NoteId::new(0), point)
+                .unwrap()
+                .speed_group,
+            group
+        );
+    }
+}
+
+#[test]
+fn keeps_warnings_when_a_later_sus_record_fails() {
+    let report = super::parse_with_diagnostics("#00010:44\n#00010:xx\n", chart::ChartMode::Xlair);
+    assert!(report.result.is_err());
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(report.diagnostics[0].line, Some(1));
+    assert_eq!(report.diagnostics[0].format, "SUS");
+}
+
+#[test]
 fn parses_hispeed_ticks_as_beats_in_both_modes_and_variable_meters() {
     for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
         for resolution in [480, 960] {
@@ -67,8 +151,11 @@ fn resolves_mixed_case_hold_channels_in_musical_order() {
         assert!(
             matches!(chart.notes()[0].kind(), NoteKind::Hold { end, checkpoints } if *end == Position::new(8, 1).unwrap() && checkpoints == &[Position::new(4, 1).unwrap()])
         );
-        assert_eq!(chart.note_speed_group(NoteId::new(0)).unwrap(), Some(0));
-        assert_eq!(chart.notes()[0].attributes().priority(), Some(42));
+        assert_eq!(chart.note_speed_group(NoteId::new(0)).unwrap(), None);
+        assert_eq!(chart.notes()[0].attributes().priority(), None);
+        let end = chart.point_metadata(NoteId::new(0), 2).unwrap();
+        assert_eq!(end.speed_group, Some(0));
+        assert_eq!(end.attributes.priority(), Some(42));
     }
     let slider = parse("#00130a:24\n#00030A:14\n").expect("mixed-case slide channel");
     assert!(matches!(slider.notes()[0].kind(), NoteKind::Slide { .. }));
@@ -273,20 +360,178 @@ fn xlair_side_taps_replace_overlapping_central_taps_in_either_record_order() {
 
 #[test]
 fn xlair_side_ex_taps_keep_the_xtap_parent_in_either_record_order() {
-    for source in ["#00110: 21\n#00150: 31", "#00150: 31\n#00110: 21"] {
-        let chart =
-            super::parse_with_mode(source, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
+    for request in [
+        "",
+        "#REQUEST \"xlair_directional_mode consume_tap\"\n",
+        "#REQUEST \"xlair_directional_mode independent\"\n",
+    ] {
+        for records in [
+            "#00110: 21\n#00150: 31",
+            "#00150: 31\n#00110: 21",
+            "#00110:28\n#00154:34",
+            "#00154:34\n#00110:28",
+        ] {
+            let source = format!("{request}{records}");
+            let chart =
+                super::parse_with_mode(&source, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
 
-        assert_eq!(chart.notes().len(), 2);
-        assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::XTap));
-        assert!(matches!(
-            chart.notes()[1].kind(),
-            NoteKind::Air {
-                properties,
-                parent,
-            } if properties.direction() == Some(chart::AirDirection::UpperLeft)
-                && *parent == chart::NoteId::new(0)
-        ));
+            assert_eq!(chart.notes().len(), 2);
+            assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::XTap));
+            assert!(matches!(
+                chart.notes()[1].kind(),
+                NoteKind::Air {
+                    properties,
+                    parent,
+                } if properties.direction() == Some(chart::AirDirection::UpperLeft)
+                    && *parent == chart::NoteId::new(0)
+            ));
+        }
+    }
+}
+
+#[test]
+fn directional_modes_do_not_turn_a_non_overlapping_xtap_into_a_side_xtap() {
+    for mode in ["consume_tap", "independent"] {
+        for records in ["#00010:24\n#00058:34\n", "#00058:34\n#00010:24\n"] {
+            let source = format!("#REQUEST \"xlair_directional_mode {mode}\"\n{records}");
+            let chart = parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
+            assert_eq!(chart.notes().len(), 2);
+            assert!(
+                chart
+                    .notes()
+                    .iter()
+                    .any(|note| note.kind() == &NoteKind::Tap(TapKind::XTap))
+            );
+            assert!(
+                chart
+                    .notes()
+                    .iter()
+                    .any(|note| note.lane() == Lane::Side(SideButton::LeftUpper))
+            );
+            assert!(
+                !chart
+                    .notes()
+                    .iter()
+                    .any(|note| matches!(note.kind(), NoteKind::Air { .. }))
+            );
+        }
+    }
+}
+
+#[test]
+fn independent_directionals_keep_ordinary_taps_and_flicks_in_either_order() {
+    for kind in ['1', '3'] {
+        let tap = format!("#00010:{kind}4\n");
+        let side = "#00050:34\n";
+        for records in [format!("{tap}{side}"), format!("{side}{tap}")] {
+            let source = format!("#REQUEST \"xlair_directional_mode independent\"\n{records}");
+            let chart = parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
+            assert_eq!(chart.notes().len(), 2);
+            assert_eq!(
+                chart
+                    .notes()
+                    .iter()
+                    .filter(|note| matches!(note.lane(), Lane::Slider { .. }))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                chart
+                    .notes()
+                    .iter()
+                    .filter(|note| note.lane() == Lane::Side(SideButton::LeftUpper))
+                    .count(),
+                1
+            );
+            let output = write_with_mode(&chart, chart::ChartMode::Xlair).unwrap();
+            let restored = parse_with_mode(&output, chart::ChartMode::Xlair).unwrap();
+            assert_eq!(restored.notes().len(), 2, "{output}");
+        }
+    }
+}
+
+#[test]
+fn explicit_consume_tap_requires_tap_one_and_identical_geometry_and_timeline() {
+    for (tap, side, count) in [
+        ("#00010:14\n", "#00050:34\n", 1),
+        ("#00010:14\n", "#00050:33\n", 2),
+        ("#00010:14\n", "#00051:34\n", 2),
+        ("#00010:34\n", "#00050:34\n", 2),
+        ("#00010:14\n", "#00150:34\n", 2),
+        ("#HISPEED 00\n#00010:14\n", "#NOSPEED\n#00050:34\n", 2),
+    ] {
+        for records in [format!("{tap}{side}"), format!("{side}{tap}")] {
+            let source =
+                format!("#REQUEST \"xlair_directional_mode consume_tap\"\n#TIL00:\"\"\n{records}");
+            let chart = parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
+            assert_eq!(chart.notes().len(), count, "{source}");
+            assert_eq!(
+                chart
+                    .notes()
+                    .iter()
+                    .filter(|note| note.lane() == Lane::Side(SideButton::LeftUpper))
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_consume_tap_consumes_at_most_one_carrier_per_directional() {
+    for records in [
+        "#00010:14\n#00010:14\n#00050:34\n",
+        "#00050:34\n#00010:14\n#00010:14\n",
+        "#00010:14\n#00050:34\n#00010:14\n",
+    ] {
+        let source = format!("#REQUEST \"xlair_directional_mode consume_tap\"\n{records}");
+        let chart = parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(chart.notes().len(), 2, "{source}");
+        assert_eq!(
+            chart
+                .notes()
+                .iter()
+                .filter(|note| matches!(note.lane(), Lane::Slider { .. }))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn directional_request_is_case_insensitive_and_the_last_value_applies_to_the_whole_chart() {
+    for (last, count) in [("INDEPENDENT", 2), ("CONSUME_TAP", 1)] {
+        let source = format!(
+            "#REQUEST \"xlair_directional_mode consume_tap\"\n#00010:14\n#00050:34\n#REQUEST \"XLAIR_DIRECTIONAL_MODE {last}\"\n"
+        );
+        let chart = parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(chart.notes().len(), count);
+    }
+}
+
+#[test]
+fn directional_request_does_not_change_normal_mode() {
+    let records = "#00010:14\n#00050:34\n";
+    let baseline = parse(records).unwrap();
+    for mode in ["consume_tap", "independent"] {
+        let source = format!("#REQUEST \"xlair_directional_mode {mode}\"\n{records}");
+        assert_eq!(parse(&source).unwrap(), baseline);
+    }
+}
+
+#[test]
+fn rejects_invalid_directional_requests_without_losing_previous_warnings() {
+    for request in [
+        "#REQUEST \"xlair_directional_mode invalid\"\n",
+        "#REQUEST \"xlair_directional_mode\"\n",
+        "#REQUEST xlair_directional_mode independent\n",
+        "#REQUEST \"xlair_directional_mode independent extra\"\n",
+    ] {
+        let source = format!("#00010:44\n{request}");
+        let report = super::parse_with_diagnostics(&source, chart::ChartMode::Xlair);
+        assert_eq!(report.result.unwrap_err().line(), Some(2));
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(report.diagnostics[0].line, Some(1));
     }
 }
 
@@ -436,9 +681,205 @@ fn parses_hispeed_definitions_and_applies_the_group_to_notes() {
 }
 
 #[test]
-fn rejects_zero_as_a_sus_group_id() {
-    assert!(parse("#TIL00: \"0'0:1.0\"\n#HISPEED 00\n#00110: 14").is_err());
+fn parses_ched_zero_timeline_without_warnings() {
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        for definition in ["", "0'0:0.5, 1'0:2.0"] {
+            let source = format!(
+                r#"This file was generated by Ched.
+#REQUEST "ticks_per_beat 480"
+#BPM01:120
+#00008:0001
+#TIL00: "{definition}"
+#HISPEED 00
+#MEASUREHS 00
+#00010:14
+#NOSPEED
+#00110:14
+"#
+            );
+            let report = super::parse_with_diagnostics(&source, mode);
+            assert!(report.diagnostics.is_empty());
+            let chart = report.result.expect("Ched timeline 00 is accepted");
+            assert_eq!(chart.note_speed_group(NoteId::new(0)).unwrap(), Some(0));
+            assert_eq!(chart.note_speed_group(NoteId::new(1)).unwrap(), None);
+            // 00 still denotes an empty BPM slot, not BPM definition zero.
+            assert_eq!(chart.tempo_changes().len(), 1);
+            assert_eq!(
+                chart.tempo_changes()[0].position(),
+                Position::new(2, 1).unwrap()
+            );
+            assert_eq!(
+                chart.scroll_speed_changes().len(),
+                if definition.is_empty() { 0 } else { 2 }
+            );
+            for change in chart.scroll_speed_changes() {
+                assert_eq!(change.scope(), ScrollScope::Group(0));
+            }
+        }
+    }
+}
+
+#[test]
+fn keeps_zero_timeline_separate_from_later_definitions_and_references() {
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        for later_definition in ["", "#TIL01: \"\"\n"] {
+            let source = format!(
+                r#"#TIL00: "0'0:0.5"
+#HISPEED 00
+#00010:14
+{later_definition}#HISPEED 01
+#00110:14
+#TILzz: "0'0:2.0"
+#HISPEED ZZ
+#00210:14
+"#
+            );
+            let chart = parse_with_mode(&source, mode).unwrap();
+            assert_eq!(chart.note_speed_group(NoteId::new(0)).unwrap(), Some(1));
+            assert_eq!(chart.note_speed_group(NoteId::new(1)).unwrap(), Some(0));
+            assert_eq!(chart.note_speed_group(NoteId::new(2)).unwrap(), Some(1294));
+            assert_eq!(
+                chart.scroll_speed_changes()[0].scope(),
+                ScrollScope::Group(1)
+            );
+            assert_eq!(
+                chart.scroll_speed_changes()[1].scope(),
+                ScrollScope::Group(1294)
+            );
+        }
+    }
+}
+
+#[test]
+fn reserves_nonzero_ids_even_for_unreferenced_empty_timelines() {
+    let source = r#"#TIL00: "0'0:0.5"
+#HISPEED 00
+#00010:14
+#TIL01: ""
+#MEASUREHS 02
+"#;
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        let chart = parse_with_mode(source, mode).unwrap();
+        assert_eq!(chart.note_speed_group(NoteId::new(0)).unwrap(), Some(2));
+        assert_eq!(
+            chart.scroll_speed_changes()[0].scope(),
+            ScrollScope::Group(2)
+        );
+    }
+}
+
+#[test]
+fn round_trips_zero_timeline_point_context_using_nonzero_ids() {
+    let source = r#"#TIL00: "0'0:0.5, 1'0:1.5"
+#TIL01: "0'0:2.0"
+#TILzz: "0'0:-0.5"
+#HISPEED 00
+#MEASUREHS 00
+#00030A:14
+#HISPEED 01
+#00134A:44
+#HISPEED ZZ
+#00238A:54
+#NOSPEED
+#0033CA:24
+"#;
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        let chart = parse_with_mode(source, mode).unwrap();
+        let id = NoteId::new(0);
+        let groups = [Some(1), Some(0), Some(1294), None];
+        assert_eq!(chart.note_speed_group(id).unwrap(), groups[0]);
+        for (index, group) in groups.into_iter().enumerate() {
+            assert_eq!(chart.point_metadata(id, index).unwrap().speed_group, group);
+        }
+
+        let output = write_with_mode(&chart, mode).unwrap();
+        assert!(output.contains("#TIL02:"));
+        assert!(output.contains("#HISPEED 02"));
+        assert!(!output.contains("#TIL00:"));
+        assert!(!output.contains("#HISPEED 00"));
+        let restored = parse_with_mode(&output, mode).unwrap();
+        assert_eq!(restored.notes(), chart.notes());
+        // The writer groups definitions by ID; order across different groups is not semantic.
+        for group in [0, 1, 1294] {
+            let changes = |chart: &Chart| {
+                chart
+                    .scroll_speed_changes()
+                    .iter()
+                    .filter(|change| change.scope() == ScrollScope::Group(group))
+                    .copied()
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(changes(&restored), changes(&chart));
+        }
+        for (index, group) in groups.into_iter().enumerate() {
+            assert_eq!(
+                restored.point_metadata(id, index).unwrap().speed_group,
+                group
+            );
+        }
+    }
+}
+
+#[test]
+fn respects_nonzero_output_id_capacity_without_merging_timelines() {
+    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    for count in [1295, 1296] {
+        let mut source = String::new();
+        for id in 0..count {
+            source.push_str(&format!(
+                "#TIL{}{}: \"0'0:1\"\n",
+                char::from(digits[id / 36]),
+                char::from(digits[id % 36]),
+            ));
+        }
+        source.push_str("#HISPEED 00\n#00010:14\n");
+        for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+            let chart = parse_with_mode(&source, mode).unwrap();
+            assert_eq!(chart.scroll_speed_changes().len(), count);
+            assert_eq!(
+                chart.note_speed_group(NoteId::new(0)).unwrap(),
+                Some((count - 1) as u32)
+            );
+            if count == 1296 {
+                assert_eq!(
+                    write_with_mode(&chart, mode),
+                    Err(super::SusError::UnrepresentablePosition)
+                );
+            } else {
+                let output = write_with_mode(&chart, mode).unwrap();
+                assert!(!output.contains("#TIL00:"));
+                let restored = parse_with_mode(&output, mode).unwrap();
+                assert_eq!(restored.scroll_speed_changes().len(), count);
+                assert_eq!(
+                    restored.note_speed_group(NoteId::new(0)).unwrap(),
+                    Some(1294)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn still_rejects_malformed_timeline_ids() {
+    for source in [
+        "#TIL0: \"\"\n",
+        "#TIL000: \"\"\n",
+        "#TIL0!: \"\"\n",
+        "#HISPEED 0\n",
+        "#HISPEED 000\n",
+        "#HISPEED 0!\n",
+        "#MEASUREHS 0\n",
+    ] {
+        for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+            assert!(parse_with_mode(source, mode).is_err(), "{source}");
+        }
+    }
+}
+
+#[test]
+fn still_rejects_zero_as_an_attribute_id() {
     assert!(parse("#ATR00: \"rh: 1.5\"\n#ATTRIBUTE 00\n#00110: 14").is_err());
+    assert!(parse("#ATTRIBUTE 00\n#00110: 14").is_err());
 }
 
 #[test]

@@ -16,3 +16,15 @@ pub enum C2sError {
     #[error("position cannot be represented at the C2S resolution")]
     UnrepresentablePosition,
 }
+
+impl C2sError {
+    pub fn line(&self) -> Option<usize> {
+        match self {
+            Self::MalformedRecord { line, .. }
+            | Self::InvalidValue { line, .. }
+            | Self::UnsupportedRecord { line, .. }
+            | Self::Chart { line, .. } => Some(*line),
+            _ => None,
+        }
+    }
+}

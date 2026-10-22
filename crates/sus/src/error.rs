@@ -20,3 +20,16 @@ pub enum SusError {
     #[error("position cannot be represented at the SUS resolution")]
     UnrepresentablePosition,
 }
+
+impl SusError {
+    pub fn line(&self) -> Option<usize> {
+        match self {
+            Self::MalformedCommand { line, .. }
+            | Self::InvalidValue { line, .. }
+            | Self::UnsupportedCommand { line, .. }
+            | Self::Chart { line, .. }
+            | Self::MissingStart { line, .. } => Some(*line),
+            _ => None,
+        }
+    }
+}

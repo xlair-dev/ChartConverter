@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use chart::{Chart, ChartMode};
+use chart::{Chart, ChartMode, ParseReport};
 use thiserror::Error;
 
 /// A chart format supported by the converter.
@@ -93,6 +93,20 @@ pub enum ConverterError {
     },
 }
 
+impl ConverterError {
+    pub fn line(&self) -> Option<usize> {
+        let source = match self {
+            Self::Parse { source, .. } | Self::Write { source, .. } => source,
+            Self::Encoding { .. } => return None,
+        };
+        match source {
+            FormatError::C2s(error) => error.line(),
+            FormatError::Sus(error) => error.line(),
+            FormatError::Ugc(error) => error.line(),
+        }
+    }
+}
+
 /// Parses a chart from a text file, accepting UTF-8 and BOM-marked UTF-16.
 pub fn parse_bytes(format: Format, source: &[u8]) -> Result<Chart, ConverterError> {
     let source =
@@ -109,6 +123,35 @@ pub fn parse_bytes_with_mode(
     let source =
         decode_source(source).map_err(|source| ConverterError::Encoding { format, source })?;
     parse_with_mode(format, mode, &source)
+}
+
+/// Parses bytes and returns invocation-local diagnostics, without printing them.
+pub fn parse_bytes_with_diagnostics(
+    format: Format,
+    mode: ChartMode,
+    source: &[u8],
+) -> ParseReport<ConverterError> {
+    match decode_source(source) {
+        Ok(source) => parse_with_diagnostics(format, mode, &source),
+        Err(source) => ParseReport {
+            result: Err(ConverterError::Encoding { format, source }),
+            diagnostics: Vec::new(),
+        },
+    }
+}
+
+/// Includes warnings emitted before a failure; neither warnings nor errors are printed.
+pub fn parse_with_diagnostics(
+    format: Format,
+    mode: ChartMode,
+    source: &str,
+) -> ParseReport<ConverterError> {
+    let report = match format {
+        Format::C2s => c2s::parse_with_diagnostics(source, mode).map_err(FormatError::from),
+        Format::Sus => sus::parse_with_diagnostics(source, mode).map_err(FormatError::from),
+        Format::Ugc => ugc::parse_with_diagnostics(source, mode).map_err(FormatError::from),
+    };
+    report.map_err(|source| ConverterError::Parse { format, source })
 }
 
 /// Parses a chart using the frontend for `format`.

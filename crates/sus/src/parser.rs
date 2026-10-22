@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use chart::{
-    AirDirection, AirProperties, Chart, ChartMode, ExDirection, Lane, Note, NoteAttributes, NoteId,
-    NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton, SlidePoint, SlidePointKind,
-    TapKind, TempoChange, report_loss,
+    AirDirection, AirProperties, Chart, ChartMode, Diagnostic, ExDirection, Lane, Note,
+    NoteAttributes, NoteId, NoteKind, ParseReport, PointMetadata, Position, ScrollScope,
+    ScrollSpeedChange, SideButton, SlidePoint, SlidePointKind, TapKind, TempoChange,
 };
 
 use crate::{
@@ -12,11 +12,21 @@ use crate::{
 };
 
 pub(super) fn parse(source: &str, mode: ChartMode) -> Result<Chart, SusError> {
-    Parser::new(mode).parse(source)
+    parse_with_diagnostics(source, mode).into_result()
+}
+
+pub(super) fn parse_with_diagnostics(source: &str, mode: ChartMode) -> ParseReport<SusError> {
+    let mut parser = Parser::new(mode);
+    let result = parser.parse(source);
+    ParseReport {
+        result,
+        diagnostics: parser.diagnostics,
+    }
 }
 
 struct PendingSlide {
     points: Vec<SlidePoint>,
+    metadata: Vec<PointMetadata>,
 }
 
 struct HoldEvent {
@@ -40,6 +50,44 @@ struct SliderEvent {
     speed_group: Option<u32>,
 }
 
+#[derive(Clone, Copy, Default)]
+enum DirectionalMode {
+    /// Preserve ChartConverter's existing overlap-based interpretation unless explicitly overridden.
+    #[default]
+    Legacy,
+    ConsumeTap,
+    Independent,
+}
+
+impl DirectionalMode {
+    fn consumes(
+        self,
+        note: &Note,
+        note_group: Option<u32>,
+        lane: Lane,
+        group: Option<u32>,
+    ) -> bool {
+        match self {
+            Self::Legacy => matches!(note.kind(), NoteKind::Tap(_)) && lane.overlaps(note.lane()),
+            Self::ConsumeTap => {
+                note.kind() == &NoteKind::Tap(TapKind::Tap)
+                    && note.lane() == lane
+                    && note_group == group
+            }
+            Self::Independent => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SideTapRegion {
+    position: Position,
+    lane: Lane,
+    button: SideButton,
+    speed_group: Option<u32>,
+    carrier_consumed: bool,
+}
+
 enum PendingStandardAir {
     Tap {
         position: Position,
@@ -61,6 +109,7 @@ enum PendingStandardAir {
 
 pub(super) struct Parser {
     mode: ChartMode,
+    diagnostics: Vec<Diagnostic>,
     timeline: chart::MeasureTimeline,
     bpm_definitions: HashMap<u32, f64>,
     pending_holds: HashMap<char, PendingSlide>,
@@ -70,18 +119,22 @@ pub(super) struct Parser {
     ticks_per_beat: u64,
     measure_base: u32,
     current_speed_group: Option<u32>,
+    /// IR-local group reserved for Ched's non-standard TIL00, separate from NOSPEED.
+    zero_speed_group: u32,
     attribute_definitions: HashMap<String, NoteAttributes>,
     current_attributes: Option<NoteAttributes>,
     chart: Chart,
     pending_standard_air: Vec<PendingStandardAir>,
     /// Geometry retained so side ExTap pairs resolve regardless of record order.
-    side_tap_regions: Vec<(Position, Lane, SideButton)>,
+    side_tap_regions: Vec<SideTapRegion>,
+    directional_mode: DirectionalMode,
 }
 
 impl Parser {
     fn new(mode: ChartMode) -> Self {
         Self {
             mode,
+            diagnostics: Vec::new(),
             timeline: chart::MeasureTimeline::new(Position::new(4, 1).unwrap()),
             bpm_definitions: HashMap::new(),
             pending_holds: HashMap::new(),
@@ -91,15 +144,17 @@ impl Parser {
             ticks_per_beat: 480,
             measure_base: 0,
             current_speed_group: None,
+            zero_speed_group: 0,
             attribute_definitions: HashMap::new(),
             current_attributes: None,
             chart: Chart::new(),
             pending_standard_air: Vec::new(),
             side_tap_regions: Vec::new(),
+            directional_mode: DirectionalMode::default(),
         }
     }
 
-    fn parse(mut self, source: &str) -> Result<Chart, SusError> {
+    fn parse(&mut self, source: &str) -> Result<Chart, SusError> {
         // Definitions describe the complete chart, while HISPEED/ATTRIBUTE and
         // MEASUREBS remain stateful commands interpreted in source order below.
         self.collect_definitions(source)?;
@@ -148,13 +203,15 @@ impl Parser {
                 continue;
             }
             if command.starts_with("HISPEED") {
-                self.current_speed_group = Some(parse_group(
-                    line,
-                    command
-                        .split_whitespace()
-                        .nth(1)
-                        .ok_or(SusError::MalformedCommand { line })?,
-                )?);
+                self.current_speed_group = Some(
+                    self.parse_speed_group(
+                        line,
+                        command
+                            .split_whitespace()
+                            .nth(1)
+                            .ok_or(SusError::MalformedCommand { line })?,
+                    )?,
+                );
                 continue;
             }
             if command == "NOSPEED" {
@@ -171,7 +228,7 @@ impl Parser {
                     .split_whitespace()
                     .nth(1)
                     .ok_or(SusError::MalformedCommand { line })?;
-                parse_group(line, value)?;
+                self.parse_speed_group(line, value)?;
                 continue;
             }
             if command.starts_with("ATR") {
@@ -216,15 +273,33 @@ impl Parser {
             return Err(SusError::MissingEnd { channel });
         }
         self.resolve_standard_air()?;
-        Ok(self.chart)
+        Ok(std::mem::take(&mut self.chart))
     }
 
     fn collect_definitions(&mut self, source: &str) -> Result<(), SusError> {
+        let mut used_speed_groups = [false; 36 * 36 - 1];
         for (index, text) in source.lines().enumerate() {
             let line = index + 1;
             let Some(command) = text.trim().strip_prefix('#').map(str::trim) else {
                 continue;
             };
+            // Like SheetsAnalyzer's document-level setting, the last valid request applies
+            // to the whole chart. Report invalid requests later in source order, not here.
+            if let Ok(Some(mode)) = parse_directional_mode(line, command) {
+                self.directional_mode = mode;
+            }
+            // Reserve nonzero IDs before assigning 00, including empty definitions and
+            // references that appear later. Leave malformed IDs to the main parsing pass.
+            let speed_id = if command.starts_with("HISPEED") || command.starts_with("MEASUREHS") {
+                command.split_whitespace().nth(1)
+            } else {
+                command
+                    .split_once(':')
+                    .and_then(|(header, _)| header.trim().strip_prefix("TIL"))
+            };
+            if let Some(Ok(group)) = speed_id.map(|id| parse_group(line, id)) {
+                used_speed_groups[group as usize] = true;
+            }
             if command.starts_with("MEASUREBS") {
                 self.parse_measure_base(line, command)?;
                 continue;
@@ -252,8 +327,21 @@ impl Parser {
                 self.timeline.set_length(measure, length);
             }
         }
+        // If all 1295 specification IDs are occupied, the IR can still retain 00 as
+        // group 1295; a SUS writer cannot represent all 1296 groups and returns an error.
+        self.zero_speed_group = used_speed_groups
+            .iter()
+            .position(|used| !used)
+            .unwrap_or(used_speed_groups.len()) as u32;
         self.measure_base = 0;
         Ok(())
+    }
+
+    fn parse_speed_group(&self, line: usize, value: &str) -> Result<u32, SusError> {
+        match parse_definition_id(line, value)? {
+            0 => Ok(self.zero_speed_group),
+            id => Ok(id - 1),
+        }
     }
 
     fn parse_measure_base(&mut self, line: usize, command: &str) -> Result<(), SusError> {
@@ -474,7 +562,11 @@ impl Parser {
                 .map_err(|source| SusError::Chart { line, source })?,
             ),
             0x10 if self.mode == ChartMode::Xlair => {
-                report_loss("SUS", "damage note in XLAIR mode");
+                self.diagnostics.push(Diagnostic::information_loss(
+                    "SUS",
+                    line,
+                    "damage note in XLAIR mode",
+                ));
                 Ok(())
             }
             0x10 => self.add_note(
@@ -483,13 +575,21 @@ impl Parser {
                     .map_err(|source| SusError::Chart { line, source })?,
             ),
             0x05 if self.mode == ChartMode::Xlair => {
-                report_loss("SUS", "slider hold in XLAIR mode");
+                self.diagnostics.push(Diagnostic::information_loss(
+                    "SUS",
+                    line,
+                    "slider hold in XLAIR mode",
+                ));
                 Ok(())
             }
             0x05 => self.parse_standard_hold(line, position, lane, data),
             0x06 => self.parse_standard_slide(line, position, lane, data),
             0x07 | 0x09 if self.mode == ChartMode::Xlair => {
-                report_loss("SUS", "AIR notation in XLAIR mode");
+                self.diagnostics.push(Diagnostic::information_loss(
+                    "SUS",
+                    line,
+                    "AIR notation in XLAIR mode",
+                ));
                 Ok(())
             }
             0x07 | 0x09 => {
@@ -511,7 +611,11 @@ impl Parser {
                 Ok(())
             }
             0x08 if self.mode == ChartMode::Xlair => {
-                report_loss("SUS", "AIR notation in XLAIR mode");
+                self.diagnostics.push(Diagnostic::information_loss(
+                    "SUS",
+                    line,
+                    "AIR notation in XLAIR mode",
+                ));
                 Ok(())
             }
             0x08 => self.parse_standard_air_hold(line, position, lane, data),
@@ -694,6 +798,9 @@ impl Parser {
     }
 
     fn parse_request(&mut self, line: usize, command: &str) -> Result<(), SusError> {
+        if parse_directional_mode(line, command)?.is_some() {
+            return Ok(());
+        }
         let value = command.trim_start_matches("REQUEST").trim();
         let fields: Vec<_> = value.trim_matches('"').split_whitespace().collect();
         if fields.len() == 2 && fields[0] == "enable_priority" {
@@ -806,7 +913,7 @@ impl Parser {
         if header.len() != 5 {
             return Err(SusError::MalformedCommand { line });
         }
-        let group = parse_group(line, &header[3..])?;
+        let group = self.parse_speed_group(line, &header[3..])?;
         let definition = data.trim_matches('"');
         if definition.is_empty() {
             return Ok(());
@@ -940,7 +1047,11 @@ impl Parser {
                 continue;
             }
             if self.mode == ChartMode::Xlair && matches!(token[0], b'4'..=b'6') {
-                report_loss("SUS", "unsupported tap variant in XLAIR mode");
+                self.diagnostics.push(Diagnostic::information_loss(
+                    "SUS",
+                    line,
+                    "unsupported tap variant in XLAIR mode",
+                ));
                 continue;
             }
             let kind = match token[0] {
@@ -997,7 +1108,11 @@ impl Parser {
                 continue;
             }
             if matches!(token[0], b'1' | b'2') {
-                report_loss("SUS", "non-side AIR direction in XLAIR mode");
+                self.diagnostics.push(Diagnostic::information_loss(
+                    "SUS",
+                    line,
+                    "non-side AIR direction in XLAIR mode",
+                ));
                 continue;
             }
             let button = match token[0] {
@@ -1010,7 +1125,13 @@ impl Parser {
             let width = base36_byte(token[1], line)?;
             let source_lane =
                 Lane::slider(lane, width).map_err(|source| SusError::Chart { line, source })?;
-            self.side_tap_regions.push((position, source_lane, button));
+            self.side_tap_regions.push(SideTapRegion {
+                position,
+                lane: source_lane,
+                button,
+                speed_group: self.current_speed_group,
+                carrier_consumed: false,
+            });
             let side_note = Note::new(position, Lane::Side(button), NoteKind::Tap(TapKind::Tap))
                 .map_err(|source| SusError::Chart { line, source })?
                 .with_attributes(self.current_attributes.unwrap_or_default());
@@ -1020,9 +1141,19 @@ impl Parser {
                     .iter()
                     .enumerate()
                     .find_map(|(index, note)| {
+                        let group = self
+                            .chart
+                            .note_speed_group(NoteId::new(index as u32))
+                            .expect("note ID comes from this chart");
                         (note.position() == position
-                            && source_lane.overlaps(note.lane())
-                            && matches!(note.kind(), NoteKind::Tap(_)))
+                            && ((note.kind() == &NoteKind::Tap(TapKind::XTap)
+                                && source_lane.overlaps(note.lane()))
+                                || self.directional_mode.consumes(
+                                    note,
+                                    group,
+                                    source_lane,
+                                    self.current_speed_group,
+                                )))
                         .then_some(NoteId::new(index as u32))
                     });
             if let Some(note_id) = overlapping_tap {
@@ -1053,6 +1184,10 @@ impl Parser {
                 self.chart
                     .set_note_speed_group(note_id, self.current_speed_group)
                     .map_err(|source| SusError::Chart { line, source })?;
+                self.side_tap_regions
+                    .last_mut()
+                    .expect("just added region")
+                    .carrier_consumed = true;
             } else {
                 self.add_note(line, side_note)?;
             }
@@ -1131,11 +1266,15 @@ impl Parser {
                         channel,
                         PendingSlide {
                             points: vec![SlidePoint::new(position, lane)],
+                            metadata: vec![PointMetadata {
+                                speed_group: event.speed_group,
+                                attributes: event.attributes,
+                            }],
                         },
                     );
                 }
                 b'2' => {
-                    let pending = self
+                    let mut pending = self
                         .pending_holds
                         .remove(&channel)
                         .ok_or(SusError::MissingStart { line, channel })?;
@@ -1150,12 +1289,12 @@ impl Parser {
                                 .collect(),
                         },
                     )
-                    .map_err(|source| SusError::Chart { line, source })?
-                    .with_attributes(event.attributes);
-                    let note_id = self.chart.add_note(note);
-                    self.chart
-                        .set_note_speed_group(note_id, event.speed_group)
-                        .map_err(|source| SusError::Chart { line, source })?;
+                    .map_err(|source| SusError::Chart { line, source })?;
+                    pending.metadata.push(PointMetadata {
+                        speed_group: event.speed_group,
+                        attributes: event.attributes,
+                    });
+                    self.add_path_note(line, note, pending.metadata)?;
                 }
                 b'3' => {
                     let pending = self
@@ -1163,6 +1302,10 @@ impl Parser {
                         .get_mut(&channel)
                         .ok_or(SusError::MissingStart { line, channel })?;
                     pending.points.push(SlidePoint::new(position, lane));
+                    pending.metadata.push(PointMetadata {
+                        speed_group: event.speed_group,
+                        attributes: event.attributes,
+                    });
                 }
                 _ => unreachable!(),
             }
@@ -1217,11 +1360,15 @@ impl Parser {
                         event.channel,
                         PendingSlide {
                             points: vec![SlidePoint::new(event.position, event.lane)],
+                            metadata: vec![PointMetadata {
+                                speed_group: event.speed_group,
+                                attributes: event.attributes,
+                            }],
                         },
                     );
                 }
                 b'2' => {
-                    let pending = self.pending_sliders.remove(&event.channel).ok_or(
+                    let mut pending = self.pending_sliders.remove(&event.channel).ok_or(
                         SusError::MissingStart {
                             line: event.line,
                             channel: event.channel,
@@ -1235,15 +1382,12 @@ impl Parser {
                             .map_err(|source| SusError::Chart {
                                 line: event.line,
                                 source,
-                            })?
-                            .with_attributes(event.attributes);
-                    let note_id = self.chart.add_note(note);
-                    self.chart
-                        .set_note_speed_group(note_id, event.speed_group)
-                        .map_err(|source| SusError::Chart {
-                            line: event.line,
-                            source,
-                        })?;
+                            })?;
+                    pending.metadata.push(PointMetadata {
+                        speed_group: event.speed_group,
+                        attributes: event.attributes,
+                    });
+                    self.add_path_note(event.line, note, pending.metadata)?;
                 }
                 b'3'..=b'5' => {
                     let pending = self.pending_sliders.get_mut(&event.channel).ok_or(
@@ -1260,6 +1404,10 @@ impl Parser {
                     pending
                         .points
                         .push(SlidePoint::new(event.position, event.lane).with_kind(point_kind));
+                    pending.metadata.push(PointMetadata {
+                        speed_group: event.speed_group,
+                        attributes: event.attributes,
+                    });
                 }
                 _ => unreachable!(),
             }
@@ -1267,13 +1415,37 @@ impl Parser {
         Ok(())
     }
 
+    fn add_path_note(
+        &mut self,
+        line: usize,
+        note: Note,
+        metadata: Vec<PointMetadata>,
+    ) -> Result<(), SusError> {
+        let start = *metadata
+            .first()
+            .ok_or(SusError::MalformedCommand { line })?;
+        let note = note
+            .with_attributes(start.attributes)
+            .with_point_metadata(
+                metadata
+                    .into_iter()
+                    .map(|point| (point != start).then_some(point))
+                    .collect(),
+            )
+            .map_err(|source| SusError::Chart { line, source })?;
+        let note_id = self.chart.add_note(note);
+        self.chart
+            .set_note_speed_group(note_id, start.speed_group)
+            .map_err(|source| SusError::Chart { line, source })
+    }
+
     fn add_note(&mut self, line: usize, note: Note) -> Result<(), SusError> {
         if self.mode == ChartMode::Xlair && note.kind() == &NoteKind::Tap(TapKind::XTap) {
             let paired_regions: Vec<_> = self
                 .side_tap_regions
                 .iter()
-                .filter(|(position, lane, _)| {
-                    *position == note.position() && lane.overlaps(note.lane())
+                .filter(|region| {
+                    region.position == note.position() && region.lane.overlaps(note.lane())
                 })
                 .copied()
                 .collect();
@@ -1288,7 +1460,7 @@ impl Parser {
                             && matches!(
                                 existing.lane(),
                                 Lane::Side(button)
-                                    if paired_regions.iter().any(|(_, _, paired)| paired == &button)
+                                    if paired_regions.iter().any(|region| region.button == button)
                             )
                             && matches!(existing.kind(), NoteKind::Tap(TapKind::Tap)))
                         .then_some(NoteId::new(index as u32))
@@ -1308,16 +1480,16 @@ impl Parser {
                 self.chart
                     .set_note_speed_group(note_id, self.current_speed_group)
                     .map_err(|source| SusError::Chart { line, source })?;
-                for (position, lane, button) in paired_regions {
-                    let direction = match button {
+                for region in paired_regions {
+                    let direction = match region.button {
                         SideButton::LeftUpper => AirDirection::UpperLeft,
                         SideButton::RightUpper => AirDirection::UpperRight,
                         SideButton::LeftLower => AirDirection::LowerLeft,
                         SideButton::RightLower => AirDirection::LowerRight,
                     };
                     let air = Note::new(
-                        position,
-                        lane,
+                        region.position,
+                        region.lane,
                         NoteKind::Air {
                             properties: AirProperties::new(direction),
                             parent: note_id,
@@ -1330,13 +1502,21 @@ impl Parser {
                 return Ok(());
             }
         }
-        if self.mode == ChartMode::Xlair
-            && matches!(note.kind(), NoteKind::Tap(_))
-            && self.side_tap_regions.iter().any(|(position, lane, _)| {
-                *position == note.position() && lane.overlaps(note.lane())
-            })
-        {
-            return Ok(());
+        if self.mode == ChartMode::Xlair {
+            let mode = self.directional_mode;
+            if let Some(region) = self.side_tap_regions.iter_mut().find(|region| {
+                region.position == note.position()
+                    && (!matches!(mode, DirectionalMode::ConsumeTap) || !region.carrier_consumed)
+                    && mode.consumes(
+                        &note,
+                        self.current_speed_group,
+                        region.lane,
+                        region.speed_group,
+                    )
+            }) {
+                region.carrier_consumed = true;
+                return Ok(());
+            }
         }
         let note_id = self
             .chart
@@ -1345,6 +1525,33 @@ impl Parser {
             .set_note_speed_group(note_id, self.current_speed_group)
             .map_err(|source| SusError::Chart { line, source })
     }
+}
+
+fn parse_directional_mode(line: usize, command: &str) -> Result<Option<DirectionalMode>, SusError> {
+    let Some(value) = command.strip_prefix("REQUEST").map(str::trim) else {
+        return Ok(None);
+    };
+    let fields: Vec<_> = value.trim_matches('"').split_whitespace().collect();
+    if !fields
+        .first()
+        .is_some_and(|name| name.eq_ignore_ascii_case("xlair_directional_mode"))
+    {
+        return Ok(None);
+    }
+    if fields.len() != 2 || !value.starts_with('"') || !value.ends_with('"') {
+        return Err(SusError::MalformedCommand { line });
+    }
+    let mode = match fields[1].to_ascii_lowercase().as_str() {
+        "consume_tap" => DirectionalMode::ConsumeTap,
+        "independent" => DirectionalMode::Independent,
+        _ => {
+            return Err(SusError::InvalidValue {
+                line,
+                value: fields[1].to_owned(),
+            });
+        }
+    };
+    Ok(Some(mode))
 }
 
 fn invalid_token(line: usize, token: &[u8]) -> SusError {

@@ -2,7 +2,7 @@
 //!
 //! The result owns all returned memory. Views are immutable and remain valid until
 //! `cc_result_free`; callers must not free individual strings, arrays, or views.
-//! Format-specific metadata, note attributes, and AIR height/color are not exposed.
+//! Additive getters expose chart metadata, note/point details, and parser diagnostics.
 
 use std::{
     ffi::{CString, c_char},
@@ -14,6 +14,22 @@ use chart::{
     AirDirection, Chart, ChartMode, Lane, NoteKind, Position, ScrollScope, SlidePointKind, TapKind,
 };
 use chart_converter::Format;
+
+mod details;
+mod diagnostics;
+
+use details::OwnedDetails;
+pub use details::*;
+use diagnostics::OwnedDiagnostics;
+pub use diagnostics::*;
+
+pub const CC_API_VERSION: u32 = 2;
+
+/// Returns the additive API revision. Existing CcChartView/CcNote/CcPoint layouts are unchanged.
+#[unsafe(no_mangle)]
+pub extern "C" fn cc_api_version() -> u32 {
+    CC_API_VERSION
+}
 
 #[repr(u32)]
 pub enum CcFormat {
@@ -197,6 +213,7 @@ struct OwnedChart {
     _points: Vec<Vec<CcPoint>>,
     tempos: Vec<CcTempo>,
     scrolls: Vec<CcScroll>,
+    details: OwnedDetails,
 }
 
 impl From<Chart> for OwnedChart {
@@ -206,6 +223,7 @@ impl From<Chart> for OwnedChart {
             _points: Vec::new(),
             tempos: Vec::new(),
             scrolls: Vec::new(),
+            details: OwnedDetails::new(&chart),
         };
         for (index, note) in chart.notes().iter().enumerate() {
             let mut points = Vec::new();
@@ -371,6 +389,7 @@ impl From<Chart> for OwnedChart {
 pub struct CcResult {
     chart: Option<OwnedChart>,
     error: Option<CString>,
+    diagnostics: OwnedDiagnostics,
 }
 
 /// Parses bytes as SUS (0), C2S (1), or UGC (2), in Normal (0) or XLAIR (1) mode.
@@ -388,6 +407,8 @@ pub unsafe extern "C" fn cc_parse(
     source: *const u8,
     length: usize,
 ) -> *mut CcResult {
+    let mut diagnostics = Vec::new();
+    let mut error_line = None;
     let parsed = catch_unwind(AssertUnwindSafe(|| -> Result<OwnedChart, String> {
         let format = match format {
             0 => Format::Sus,
@@ -408,22 +429,75 @@ pub unsafe extern "C" fn cc_parse(
         } else {
             unsafe { slice::from_raw_parts(source, length) }
         };
-        chart_converter::parse_bytes_with_mode(format, mode, source)
+        let report = chart_converter::parse_bytes_with_diagnostics(format, mode, source);
+        diagnostics = report.diagnostics;
+        error_line = report.result.as_ref().err().and_then(|error| error.line());
+        report
+            .result
             .map(Into::into)
             .map_err(|error| error.to_string())
     }))
     .unwrap_or_else(|_| Err("chart parser panicked".into()));
-    let result = match parsed {
-        Ok(chart) => CcResult {
-            chart: Some(chart),
-            error: None,
-        },
-        Err(error) => CcResult {
-            chart: None,
-            error: Some(CString::new(error.replace('\0', "\\0")).expect("no embedded NUL")),
-        },
+    let (chart, error) = match parsed {
+        Ok(chart) => (Some(chart), None),
+        Err(error) => {
+            diagnostics.push(chart::Diagnostic {
+                severity: chart::DiagnosticSeverity::Error,
+                format: match format {
+                    0 => "SUS",
+                    1 => "C2S",
+                    2 => "UGC",
+                    _ => "",
+                },
+                line: error_line,
+                message: error.clone(),
+            });
+            (
+                None,
+                Some(CString::new(error.replace('\0', "\\0")).expect("no embedded NUL")),
+            )
+        }
+    };
+    let result = CcResult {
+        chart,
+        error,
+        diagnostics: OwnedDiagnostics::new(diagnostics),
     };
     Box::into_raw(Box::new(result))
+}
+
+/// Returns chart-level source metadata. Null/failed results return absent values and an empty array.
+/// # Safety
+/// A non-null result must be a live pointer returned by cc_parse.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cc_result_metadata(result: *const CcResult) -> CcChartMetadata {
+    (unsafe { result.as_ref() })
+        .and_then(|result| result.chart.as_ref())
+        .map_or_else(CcChartMetadata::default, |chart| chart.details.metadata())
+}
+
+/// Returns details for a stable CcNote.id, or null for an invalid ID or failed/null result.
+/// # Safety
+/// A non-null result must be a live pointer returned by cc_parse.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cc_result_note_details(
+    result: *const CcResult,
+    note_id: u32,
+) -> *const CcNoteDetails {
+    (unsafe { result.as_ref() })
+        .and_then(|result| result.chart.as_ref())
+        .and_then(|chart| chart.details.notes.get(note_id as usize))
+        .map_or(ptr::null(), |details| details as *const CcNoteDetails)
+}
+
+/// Returns invocation-local warnings and the fatal error, if any; valid even after parse failure.
+/// # Safety
+/// A non-null result must be a live pointer returned by cc_parse.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cc_result_diagnostics(result: *const CcResult) -> CcDiagnosticsView {
+    (unsafe { result.as_ref() }).map_or_else(CcDiagnosticsView::default, |result| {
+        result.diagnostics.view()
+    })
 }
 
 /// Returns a borrowed chart view, or an empty view on failure or a null result.

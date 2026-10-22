@@ -6,6 +6,59 @@ use chart::{
 use super::{parse, write};
 
 #[test]
+fn preserves_timeline_zero_and_base_timeline_independently() {
+    let source = "@MAINTIL\t2\n@TIL\t0\t0'0\t0.5\n@ENDHEAD\n#0'0:t04\n@USETIL\t1\n#0'480:t04\n@USETIL\t0\n#0'960:t04\n";
+    let chart = parse(source).unwrap();
+    assert_eq!(chart.main_speed_group(), Some(2));
+    for (index, group) in [0, 1, 0].into_iter().enumerate() {
+        assert_eq!(
+            chart
+                .note_speed_group(chart::NoteId::new(index as u32))
+                .unwrap(),
+            Some(group)
+        );
+    }
+    let restored = parse(&write(&chart).unwrap()).unwrap();
+    assert_eq!(restored.main_speed_group(), Some(2));
+    assert_eq!(
+        restored.note_speed_group(chart::NoteId::new(0)).unwrap(),
+        Some(0)
+    );
+}
+
+#[test]
+fn preserves_groups_at_long_note_points_and_restores_writer_state() {
+    for kind in ["s04", "h04"] {
+        let source = format!(
+            "@TIL\t0\t0'0\t0.5\n@TIL\t2\t0'0\t2\n@BGMOFS\t0.25\n@ENDHEAD\n#0'0:{kind}\n@USETIL\t2\n#480>s04\n#960>s04\n#1'0:t84\n"
+        );
+        let chart = parse(&source).unwrap();
+        let id = chart::NoteId::new(0);
+        assert_eq!(chart.note_speed_group(id).unwrap(), Some(0));
+        assert_eq!(chart.point_metadata(id, 0).unwrap().speed_group, Some(0));
+        assert_eq!(chart.point_metadata(id, 1).unwrap().speed_group, Some(2));
+        assert_eq!(chart.point_metadata(id, 2).unwrap().speed_group, Some(2));
+        assert_eq!(
+            chart.note_speed_group(chart::NoteId::new(1)).unwrap(),
+            Some(2)
+        );
+        let restored = parse(&write(&chart).unwrap()).unwrap();
+        assert_eq!(restored.notes(), chart.notes());
+        assert_eq!(restored.audio_offset_seconds(), Some(0.25));
+        assert_eq!(
+            restored.note_speed_group(chart::NoteId::new(1)).unwrap(),
+            Some(2)
+        );
+        for point in 0..3 {
+            assert_eq!(
+                restored.point_metadata(id, point).unwrap(),
+                chart.point_metadata(id, point).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
 fn parses_parent_ticks_consistently_with_follower_ticks_in_variable_meters() {
     for numerator in [3, 5] {
         for resolution in [480, 960] {
@@ -205,10 +258,7 @@ fn rejects_air_and_speed_records_without_a_lossy_conversion() {
         Err(super::UgcError::InvalidValue { .. })
     ));
     let speed = "@MAINTIL\t1\n@ENDHEAD\n";
-    assert!(matches!(
-        parse(speed),
-        Err(super::UgcError::UnsupportedRecord { .. })
-    ));
+    assert_eq!(parse(speed).unwrap().main_speed_group(), Some(1));
 
     let speed_field = "@SPDDEF\t1\t0\t1.0\n@ENDHEAD\n";
     assert!(matches!(

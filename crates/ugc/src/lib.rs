@@ -19,6 +19,11 @@ pub fn parse_with_mode(source: &str, mode: ChartMode) -> Result<Chart, UgcError>
     parser::parse(source, mode)
 }
 
+/// Parses without printing warnings; diagnostics also survive a parse failure.
+pub fn parse_with_diagnostics(source: &str, mode: ChartMode) -> chart::ParseReport<UgcError> {
+    parser::parse_with_diagnostics(source, mode)
+}
+
 /// Writes the representable shared chart model as a UGC document.
 ///
 /// Measure-length changes stored in the shared chart are preserved in the

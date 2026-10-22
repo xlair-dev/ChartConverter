@@ -34,7 +34,7 @@ def write_cmake_config(path, library_name, native_libraries):
         elif argument.startswith("-l") and len(argument) > 2:
             link_libraries.append(argument[2:])
             index += 1
-        elif argument.startswith("-"):
+        elif argument.startswith("-") or argument.lower().startswith("/defaultlib:"):
             link_options.append(argument)
             index += 1
         else:
@@ -69,7 +69,7 @@ def write_cmake_config(path, library_name, native_libraries):
 def run(command, *, env=None, print_output=True):
     result = subprocess.run(
         command,
-        check=True,
+        check=False,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -77,8 +77,9 @@ def run(command, *, env=None, print_output=True):
         encoding="utf-8",
         errors="replace",
     )
-    if print_output:
-        print(result.stdout, end="")
+    if print_output or result.returncode != 0:
+        print(result.stdout, end="", flush=True)
+    result.check_returncode()
     return result.stdout
 
 
@@ -108,6 +109,8 @@ def main():
             [
                 "cargo",
                 "rustc",
+                "--color",
+                "never",
                 "-p",
                 "chart-converter-ffi",
                 "--target",
@@ -151,6 +154,14 @@ def main():
             library.name,
             native_libraries[0],
         )
+
+        smoke_build = staging / "smoke-build"
+        run([
+            "cmake", "-S", "crates/chart-converter-ffi/tests", "-B", str(smoke_build),
+            f"-DCMAKE_PREFIX_PATH={package_root}", "-DCMAKE_BUILD_TYPE=Release",
+        ])
+        run(["cmake", "--build", str(smoke_build), "--config", "Release"])
+        run(["ctest", "--test-dir", str(smoke_build), "-C", "Release", "--output-on-failure"])
 
         output_dir = Path("dist")
         output_dir.mkdir(exist_ok=True)

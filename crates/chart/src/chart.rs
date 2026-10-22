@@ -1,7 +1,7 @@
 use crate::{
     Position,
     error::ChartError,
-    note::{AirPoint, Note, SlidePoint},
+    note::{AirPoint, Note, PointMetadata, SlidePoint},
     timing::{ScrollSpeedChange, TempoChange},
 };
 
@@ -31,6 +31,7 @@ pub struct Chart {
     audio_offset_seconds: Option<f64>,
     priority_enabled: Option<bool>,
     base_bpm: Option<f64>,
+    main_speed_group: Option<u32>,
 }
 
 impl Chart {
@@ -158,6 +159,32 @@ impl Chart {
             .ok_or(ChartError::InvalidNoteId)
     }
 
+    /// Resolves inheritance without conflating an explicit no-speed point with an inherited group.
+    pub fn point_metadata(
+        &self,
+        note_id: NoteId,
+        index: usize,
+    ) -> Result<PointMetadata, ChartError> {
+        let note = self.note(note_id)?;
+        let metadata = note
+            .point_metadata()
+            .get(index)
+            .ok_or(ChartError::InvalidPointIndex)?;
+        Ok(metadata.unwrap_or(PointMetadata {
+            speed_group: self.note_speed_group(note_id)?,
+            attributes: note.attributes(),
+        }))
+    }
+
+    /// Base timeline used by formats such as UGC, independent of per-note group assignments.
+    pub fn set_main_speed_group(&mut self, group: u32) {
+        self.main_speed_group = Some(group);
+    }
+
+    pub fn main_speed_group(&self) -> Option<u32> {
+        self.main_speed_group
+    }
+
     pub fn tempo_changes(&self) -> &[TempoChange] {
         &self.tempo_changes
     }
@@ -191,6 +218,53 @@ impl Chart {
 mod tests {
     use super::Chart;
     use crate::{Lane, Note, NoteKind, Position, TapKind};
+
+    #[test]
+    fn resolves_point_inheritance_and_explicit_no_speed() {
+        let mut chart = Chart::new();
+        let position = Position::new(0, 1).unwrap();
+        let lane = Lane::slider(0, 4).unwrap();
+        let attributes = crate::NoteAttributes::new().with_priority(0);
+        let note = Note::new(
+            position,
+            lane,
+            NoteKind::Slide {
+                points: vec![
+                    crate::SlidePoint::new(position, lane),
+                    crate::SlidePoint::new(Position::new(1, 1).unwrap(), lane),
+                ],
+            },
+        )
+        .unwrap()
+        .with_attributes(attributes)
+        .with_point_metadata(vec![None, Some(crate::PointMetadata::default())])
+        .unwrap();
+        assert!(note.clone().with_point_metadata(vec![None]).is_err());
+        let id = chart.add_note(note);
+        chart.set_note_speed_group(id, Some(0)).unwrap();
+        assert_eq!(chart.point_metadata(id, 0).unwrap().speed_group, Some(0));
+        assert_eq!(chart.point_metadata(id, 0).unwrap().attributes, attributes);
+        assert_eq!(
+            chart.point_metadata(id, 1).unwrap(),
+            crate::PointMetadata::default()
+        );
+        assert_eq!(
+            chart.point_metadata(id, 2),
+            Err(crate::ChartError::InvalidPointIndex)
+        );
+        chart
+            .append_slide_point(
+                id,
+                crate::SlidePoint::new(Position::new(2, 1).unwrap(), lane),
+            )
+            .unwrap();
+        assert_eq!(chart.point_metadata(id, 2).unwrap().speed_group, Some(0));
+        assert_eq!(chart.note(id).unwrap().point_metadata().len(), 3);
+        assert_eq!(
+            chart.point_metadata(super::NoteId::new(99), 0),
+            Err(crate::ChartError::InvalidNoteId)
+        );
+    }
 
     #[test]
     fn assigns_speed_groups_to_note_ids() {
