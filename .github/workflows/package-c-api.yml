@@ -80,13 +80,12 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: build and publish package image
-    if: needs.package.result == 'success'
+    name: publish commit release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: package
     runs-on: ubuntu-22.04
     permissions:
-      contents: read
-      packages: write
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -99,49 +98,35 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Assemble image contents
+      - name: Check package archives
         run: |
-          mkdir -p dist/image/packages dist/image/archives
           for target in x86_64-unknown-linux-gnu x86_64-apple-darwin x86_64-pc-windows-msvc; do
             archive="dist/chart-converter-ffi-${target}.zip"
             test -f "$archive"
             test -f "${archive}.sha256"
-            mkdir -p "dist/image/packages/${target}"
-            unzip -q "$archive" -d "dist/image/packages/${target}"
-            cp "$archive" "${archive}.sha256" dist/image/archives/
           done
-          cp crates/chart-converter-ffi/README.md dist/image/README.md
-          cp crates/chart-converter-ffi/package-image.Dockerfile dist/image/Dockerfile
 
-      - name: Build package image for pull request
-        if: github.event_name == 'pull_request'
-        run: |
-          docker buildx create --name c-api-builder --driver docker-container --use
-          docker buildx inspect --bootstrap
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --tag chartconverter-ffi:pr-${{ github.event.number }} \
-            --output type=oci,dest=dist/chartconverter-ffi.oci.tar \
-            dist/image
-
-      - name: Log in to GitHub Container Registry
-        if: github.event_name == 'push'
+      - name: Publish commit release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: sha-${{ github.sha }}
         run: |
-          docker buildx create --name c-api-builder --driver docker-container --use
-          docker buildx inspect --bootstrap
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          latest_main_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)
+          if [ "$latest_main_sha" != "$GITHUB_SHA" ]; then
+            echo "Skipping stale commit ${GITHUB_SHA}; main is at ${latest_main_sha}."
+            exit 0
+          fi
 
-      - name: Publish package image
-        if: github.event_name == 'push'
-        env:
-          IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/chartconverter-ffi
-        run: |
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --tag "${IMAGE_NAME}:latest" \
-            --tag "${IMAGE_NAME}:sha-${GITHUB_SHA}" \
-            --push \
-            dist/image
+          title="ChartConverter C API ${GITHUB_SHA::12}"
+          notes="Built from commit ${GITHUB_SHA}."
+          assets=(dist/*.zip dist/*.zip.sha256)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+            gh release edit "$RELEASE_TAG" --title "$title" --notes "$notes" --latest
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "$title" \
+              --notes "$notes" \
+              --latest
+          fi
