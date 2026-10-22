@@ -2,8 +2,8 @@ name: C API Packages
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
   pull_request:
     paths:
       - Cargo.lock
@@ -15,6 +15,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: c-api-packages-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   package:
@@ -75,15 +79,19 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  release:
-    name: publish release packages
-    if: startsWith(github.ref, 'refs/tags/v')
+  publish:
+    name: build and publish package image
+    if: needs.package.result == 'success'
     needs: package
     runs-on: ubuntu-22.04
     permissions:
-      contents: write
+      contents: read
+      packages: write
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
       - name: Download package artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -91,18 +99,49 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Check release assets
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
+      - name: Assemble image contents
         run: |
-          version="${RELEASE_TAG#v}"
+          mkdir -p dist/image/packages dist/image/archives
           for target in x86_64-unknown-linux-gnu x86_64-apple-darwin x86_64-pc-windows-msvc; do
-            test -f "dist/chart-converter-ffi-${version}-${target}.zip"
-            test -f "dist/chart-converter-ffi-${version}-${target}.zip.sha256"
+            archive="dist/chart-converter-ffi-${target}.zip"
+            test -f "$archive"
+            test -f "${archive}.sha256"
+            mkdir -p "dist/image/packages/${target}"
+            unzip -q "$archive" -d "dist/image/packages/${target}"
+            cp "$archive" "${archive}.sha256" dist/image/archives/
           done
+          cp crates/chart-converter-ffi/README.md dist/image/README.md
+          cp crates/chart-converter-ffi/package-image.Dockerfile dist/image/Dockerfile
 
-      - name: Publish GitHub release
+      - name: Build package image for pull request
+        if: github.event_name == 'pull_request'
+        run: |
+          docker buildx create --name c-api-builder --driver docker-container --use
+          docker buildx inspect --bootstrap
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --tag chartconverter-ffi:pr-${{ github.event.number }} \
+            --output type=oci,dest=dist/chartconverter-ffi.oci.tar \
+            dist/image
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" dist/*.zip dist/*.zip.sha256 --verify-tag --generate-notes
+        run: |
+          docker buildx create --name c-api-builder --driver docker-container --use
+          docker buildx inspect --bootstrap
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Publish package image
+        if: github.event_name == 'push'
+        env:
+          IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/chartconverter-ffi
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --tag "${IMAGE_NAME}:latest" \
+            --tag "${IMAGE_NAME}:sha-${GITHUB_SHA}" \
+            --push \
+            dist/image
