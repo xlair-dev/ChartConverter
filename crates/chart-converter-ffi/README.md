@@ -53,6 +53,31 @@ The note-level context of a parsed long note is its start-point context, not its
 For short notes the point array is empty. Control/visible/invisible kinds remain in
 the original `CcPoint`; start/end are identified by path order.
 
+### Normalized slide paths
+
+All slide points are on the path and can be joined directly, regardless of input
+format. `Control` means a non-checkpoint path point (UGC `c` / C2S `SLC`), **not**
+a mathematical Bezier handle. SUS token `4` handles are expanded by the SUS
+frontend before the IR is exposed. Do not evaluate them as Bezier curves again.
+`Invisible` is also an on-path hidden anchor, retained from SUS token `5`.
+
+Expansion follows XLAIR's De Casteljau evaluation at 20 subdivisions per second,
+using the tempo map (default BPM 120), time-linear widths and outward u8 lane
+rounding. Generated positions use a bounded 480-tick beat grid independent of
+the SUS `ticks_per_beat` setting. Lanes and widths are evaluated at the rounded
+time, and duplicate ticks are skipped; authored anchors stay exact. Generated
+points inherit the previous authored anchor's speed group/attributes, and are never visible
+checkpoints. Geometry/CPU expansion limits produce parse errors with source lines.
+
+SUS writes normalized non-checkpoints as token `5`, so parsing the output does not
+expand a curve a second time. UGC/C2S serialize both non-checkpoint point kinds as
+their on-path control records. Source Bezier handles are not retained for lossless
+authoring round-trip. The C2S writer extends its output resolution as needed to
+retain the normalized paths, rather than omitting them on its former fixed grid.
+This corrects path semantics without changing the API revision,
+enum values, coordinate types, ownership, or C struct layouts; SUS paths may contain
+more points, and point-details counts continue to match the expanded path.
+
 Warnings do not make parsing fail: `cc_result_error` is still null after successful
 parsing with omitted elements. Diagnostics include warnings emitted before a fatal
 error. The C API does not print diagnostics. Rust callers can use each frontend's

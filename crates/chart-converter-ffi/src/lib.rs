@@ -107,8 +107,12 @@ impl From<Lane> for CcLane {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub enum CcPointKind {
+    /// On-path anchor with a visible checkpoint.
     Visible,
+    /// On-path hidden anchor, including SUS token 5.
     Invisible,
+    /// On-path non-checkpoint. SUS Bezier handles have already been expanded.
+    /// Join this point like a UGC c / C2S SLC point; do not apply Bezier again.
     Control,
 }
 #[repr(C)]
