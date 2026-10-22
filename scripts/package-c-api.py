@@ -69,7 +69,7 @@ def write_cmake_config(path, library_name, native_libraries):
 def run(command, *, env=None, print_output=True):
     result = subprocess.run(
         command,
-        check=True,
+        check=False,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -77,8 +77,9 @@ def run(command, *, env=None, print_output=True):
         encoding="utf-8",
         errors="replace",
     )
-    if print_output:
-        print(result.stdout, end="")
+    if print_output or result.returncode != 0:
+        print(result.stdout, end="", flush=True)
+    result.check_returncode()
     return result.stdout
 
 
@@ -108,6 +109,8 @@ def main():
             [
                 "cargo",
                 "rustc",
+                "--color",
+                "never",
                 "-p",
                 "chart-converter-ffi",
                 "--target",
