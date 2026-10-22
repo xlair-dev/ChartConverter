@@ -1,4 +1,6 @@
 //! Parser and writer for the general SUS chart format and its XLAIR mode.
+//! Directive names and symbolic tokens are ASCII case-insensitive; string
+//! arguments retain their original spelling.
 //!
 //! Both modes accept Ched's `TIL00` / `HISPEED 00` / `MEASUREHS 00` notation.
 //! Speed-group IDs are IR-local: `00` is assigned an unused group without changing
@@ -62,3 +64,6 @@ mod tests;
 
 #[cfg(test)]
 mod curve_tests;
+
+#[cfg(test)]
+mod case_tests;
