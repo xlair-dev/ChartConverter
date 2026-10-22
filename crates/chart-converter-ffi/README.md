@@ -35,7 +35,10 @@ target triple. The Windows archive targets `x86_64-pc-windows-msvc` and contains
 `.lib`; the macOS and Linux archives currently target `x86_64` and contain a `.a`.
 Tags must use `v` followed by this crate's version (for example, `v0.1.0`). These
 archives contain the release-profile library and must be used only with the matching
-target.
+target. The Linux archive is built on Ubuntu 22.04 and requires a compatible glibc
+runtime. The macOS archive is built with a 13.0 deployment target, matching XLAIR's
+minimum macOS version. The Windows archive uses the statically linked MSVC runtime;
+consumers must use a compatible runtime configuration.
 
 After extracting an archive, add its root directory to `CMAKE_PREFIX_PATH` and use
 `find_package(ChartConverterFFI CONFIG REQUIRED)`. Link the
