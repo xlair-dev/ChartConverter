@@ -1,5 +1,5 @@
 fn main() {
-    println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-env-changed=CHART_CONVERTER_HEADER_DIR");
     let destination = std::env::var_os("CHART_CONVERTER_HEADER_DIR")
         .unwrap_or_else(|| std::env::var_os("OUT_DIR").expect("Cargo output directory"));
