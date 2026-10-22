@@ -28,20 +28,29 @@ Static consumers must link Rust's native platform dependencies. The generated CM
 package carries the native link dependencies reported by Rust; Corrosion remains an
 option for consumers that build ChartConverter from source.
 
-Tagged releases publish target-specific archives containing the generated header,
-static library, a CMake package, native link dependencies reported by `rustc`, and
-this README. The archive and its `.sha256` sidecar use the same version and Rust
-target triple. The Windows archive targets `x86_64-pc-windows-msvc` and contains a
-`.lib`; the macOS and Linux archives currently target `x86_64` and contain a `.a`.
-Tags must use `v` followed by this crate's version (for example, `v0.1.0`). These
-archives contain the release-profile library and must be used only with the matching
-target. The Linux archive is built on Ubuntu 22.04 and requires a compatible glibc
-runtime. The macOS archive is built with a 13.0 deployment target, matching XLAIR's
-minimum macOS version. The Windows archive uses the statically linked MSVC runtime;
-consumers must use a compatible runtime configuration.
+Each push to `main` publishes a GitHub Release tagged with `sha-<full commit SHA>`
+and marks it as the latest release. Version-numbered releases are not created. Each
+release contains target-specific ZIP archives and `.sha256` sidecars. An archive
+contains the generated header, static library, CMake package, native link
+dependencies reported by `rustc`, and this README. The Windows archive targets
+`x86_64-pc-windows-msvc` and contains a `.lib`; the macOS and Linux archives
+currently target `x86_64` and contain a `.a`. These archives contain the
+release-profile library and must be used only with the matching target. The Linux
+archive is built on Ubuntu 22.04 and requires a compatible glibc runtime. The macOS
+archive is built with a 13.0 deployment target, matching XLAIR's minimum macOS
+version. The Windows archive uses the statically linked MSVC runtime; consumers
+must use a compatible runtime configuration.
 
-After extracting an archive, add its root directory to `CMAKE_PREFIX_PATH` and use
+Download the latest archive or pin it to a commit:
+
+```sh
+curl -LO https://github.com/xlair-dev/ChartConverter/releases/latest/download/chart-converter-ffi-x86_64-pc-windows-msvc.zip
+curl -LO https://github.com/xlair-dev/ChartConverter/releases/latest/download/chart-converter-ffi-x86_64-pc-windows-msvc.zip.sha256
+curl -LO https://github.com/xlair-dev/ChartConverter/releases/download/sha-<full-commit-sha>/chart-converter-ffi-x86_64-pc-windows-msvc.zip
+```
+
+The archive can be verified with its `.sha256` sidecar. After extracting it, add
+its root directory to `CMAKE_PREFIX_PATH` and use
 `find_package(ChartConverterFFI CONFIG REQUIRED)`. Link the
 `ChartConverter::FFI` target to the C or C++ consumer; the package carries the
-native link dependencies reported by Rust. The `.sha256` sidecar can be used to
-verify a downloaded archive before extracting it.
+native link dependencies reported by Rust.

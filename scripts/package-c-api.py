@@ -143,7 +143,7 @@ def main():
             Path("crates/chart-converter-ffi/README.md"), package_root / "README.md"
         )
         (package_root / "native-static-libs.txt").write_text(
-            f"Target: {target}\n{native_libraries[0]}\n",
+            f"Version: {version}\nTarget: {target}\n{native_libraries[0]}\n",
             encoding="utf-8",
         )
         write_cmake_config(
@@ -154,7 +154,7 @@ def main():
 
         output_dir = Path("dist")
         output_dir.mkdir(exist_ok=True)
-        archive = output_dir / f"chart-converter-ffi-{version}-{target}.zip"
+        archive = output_dir / f"chart-converter-ffi-{target}.zip"
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as package_zip:
             for path in sorted(package_root.rglob("*")):
                 if path.is_file():
