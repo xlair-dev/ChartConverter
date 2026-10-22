@@ -34,6 +34,55 @@ fn parses_hispeed_ticks_as_beats_in_both_modes_and_variable_meters() {
 }
 
 #[test]
+fn resolves_bpm_and_measure_definitions_before_note_positions() {
+    let chart =
+        parse("#00110:14\n#00008:0a\n#TIL01:\"1'240:2.0\"\n#BPM0A:120\n#BPM0a:60\n#00002:3\n")
+            .expect("definitions may follow their uses");
+    assert_eq!(chart.notes()[0].position(), Position::new(3, 1).unwrap());
+    assert_eq!(chart.tempo_changes()[0].bpm(), 60.0);
+    assert_eq!(
+        chart.scroll_speed_changes()[0].position(),
+        Position::new(7, 2).unwrap()
+    );
+}
+
+#[test]
+fn preserves_measure_base_while_collecting_later_measure_definitions() {
+    let chart = parse("#MEASUREBS 1\n#00110:14\n#00002:3\n#MEASUREBS 0\n#00102:5\n")
+        .expect("measure definitions use the base at their source line");
+    assert_eq!(chart.notes()[0].position(), Position::new(9, 1).unwrap());
+    assert_eq!(
+        chart.measure_lengths(),
+        &[(1, Position::new(5, 1).unwrap())]
+    );
+}
+
+#[test]
+fn resolves_mixed_case_hold_channels_in_musical_order() {
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        let source = "#TIL01:\"0'0:1.5\"\n#ATR01:\"pr:42\"\n#HISPEED 01\n#ATTRIBUTE 01\n#00220A:24\n#NOSPEED\n#NOATTRIBUTE\n#00120a:34\n#00020A:14\n";
+        let chart = parse_with_mode(source, mode).expect("unordered hold points");
+        assert_eq!(chart.notes().len(), 1);
+        assert_eq!(chart.notes()[0].position(), Position::new(0, 1).unwrap());
+        assert!(
+            matches!(chart.notes()[0].kind(), NoteKind::Hold { end, checkpoints } if *end == Position::new(8, 1).unwrap() && checkpoints == &[Position::new(4, 1).unwrap()])
+        );
+        assert_eq!(chart.note_speed_group(NoteId::new(0)).unwrap(), Some(0));
+        assert_eq!(chart.notes()[0].attributes().priority(), Some(42));
+    }
+    let slider = parse("#00130a:24\n#00030A:14\n").expect("mixed-case slide channel");
+    assert!(matches!(slider.notes()[0].kind(), NoteKind::Slide { .. }));
+}
+
+#[test]
+fn rejects_a_long_note_without_a_channel_without_panicking() {
+    for header in ["00020", "00030", "00040"] {
+        let result = std::panic::catch_unwind(|| parse(&format!("#{header}:14\n")));
+        assert!(result.expect("invalid data must return an error").is_err());
+    }
+}
+
+#[test]
 fn parses_inline_note_and_bpm_ticks_in_variable_meters() {
     let chart = parse("#00002:3\n#BPM01:120\n#000F0:0801\n#000F0:010008\n")
         .expect("inline ticks are beat-based too");

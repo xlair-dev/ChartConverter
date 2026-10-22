@@ -17,11 +17,17 @@ pub(super) fn parse(source: &str, mode: ChartMode) -> Result<Chart, SusError> {
 
 struct PendingSlide {
     points: Vec<SlidePoint>,
-    side_button: Option<SideButton>,
 }
 
-struct PendingSlider {
-    points: Vec<SlidePoint>,
+struct HoldEvent {
+    line: usize,
+    channel: char,
+    position: Position,
+    lane: u8,
+    width: u8,
+    kind: u8,
+    attributes: NoteAttributes,
+    speed_group: Option<u32>,
 }
 
 struct SliderEvent {
@@ -56,10 +62,10 @@ enum PendingStandardAir {
 pub(super) struct Parser {
     mode: ChartMode,
     timeline: chart::MeasureTimeline,
-    bpm_definitions: HashMap<String, f64>,
-    pending_side_longs: HashMap<char, PendingSlide>,
+    bpm_definitions: HashMap<u32, f64>,
     pending_holds: HashMap<char, PendingSlide>,
-    pending_sliders: HashMap<char, PendingSlider>,
+    pending_sliders: HashMap<char, PendingSlide>,
+    hold_events: Vec<HoldEvent>,
     slider_events: Vec<SliderEvent>,
     ticks_per_beat: u64,
     measure_base: u32,
@@ -78,9 +84,9 @@ impl Parser {
             mode,
             timeline: chart::MeasureTimeline::new(Position::new(4, 1).unwrap()),
             bpm_definitions: HashMap::new(),
-            pending_side_longs: HashMap::new(),
             pending_holds: HashMap::new(),
             pending_sliders: HashMap::new(),
+            hold_events: Vec::new(),
             slider_events: Vec::new(),
             ticks_per_beat: 480,
             measure_base: 0,
@@ -94,6 +100,9 @@ impl Parser {
     }
 
     fn parse(mut self, source: &str) -> Result<Chart, SusError> {
+        // Definitions describe the complete chart, while HISPEED/ATTRIBUTE and
+        // MEASUREBS remain stateful commands interpreted in source order below.
+        self.collect_definitions(source)?;
         for (line_index, raw_line) in source.lines().enumerate() {
             let line = line_index + 1;
             let text = raw_line.trim();
@@ -153,14 +162,7 @@ impl Parser {
                 continue;
             }
             if command.starts_with("MEASUREBS") {
-                let value = command
-                    .split_whitespace()
-                    .nth(1)
-                    .ok_or(SusError::MalformedCommand { line })?;
-                self.measure_base = value.parse().map_err(|_| SusError::InvalidValue {
-                    line,
-                    value: value.to_owned(),
-                })?;
+                self.parse_measure_base(line, command)?;
                 continue;
             }
             if command.starts_with("MEASUREHS") {
@@ -194,29 +196,18 @@ impl Parser {
             let header = header.trim();
             let data = data.trim().replace(' ', "");
             if header.starts_with("BPM") {
-                self.parse_bpm_definition(line, header, &data)?;
+                // Already validated and collected, including later redefinitions.
+                continue;
             } else if header.starts_with("TIL") {
                 self.parse_til_definition(line, header, &data)?;
-            } else if header.len() == 5
-                && header.chars().all(|c| c.is_ascii_hexdigit())
-                && !header.ends_with("08")
-                && (data.len() >= 6 || (data.len() == 4 && &data[..2] == "08"))
-                && u8::from_str_radix(&data[..2], 16).is_ok_and(|code| {
-                    matches!(
-                        code,
-                        0x01 | 0x02 | 0x03 | 0x05 | 0x06 | 0x07 | 0x08 | 0x09 | 0x10
-                    )
-                })
-            {
+            } else if is_standard_note(header, &data) {
                 self.parse_standard_note(line, header, &data)?;
             } else if header.len() >= 3 && header[..3].chars().all(|c| c.is_ascii_digit()) {
                 self.parse_data_line(line, header, &data)?;
             }
         }
 
-        if let Some(channel) = self.pending_side_longs.keys().next().copied() {
-            return Err(SusError::MissingEnd { channel });
-        }
+        self.resolve_holds()?;
         if let Some(channel) = self.pending_holds.keys().next().copied() {
             return Err(SusError::MissingEnd { channel });
         }
@@ -226,6 +217,68 @@ impl Parser {
         }
         self.resolve_standard_air()?;
         Ok(self.chart)
+    }
+
+    fn collect_definitions(&mut self, source: &str) -> Result<(), SusError> {
+        for (index, text) in source.lines().enumerate() {
+            let line = index + 1;
+            let Some(command) = text.trim().strip_prefix('#').map(str::trim) else {
+                continue;
+            };
+            if command.starts_with("MEASUREBS") {
+                self.parse_measure_base(line, command)?;
+                continue;
+            }
+            let Some((header, data)) = command.split_once(':') else {
+                continue;
+            };
+            let header = header.trim();
+            let data = data.trim().replace(' ', "");
+            if header.starts_with("BPM") {
+                self.parse_bpm_definition(line, header, &data)?;
+            } else if header.len() == 5
+                && header.ends_with("02")
+                && header.as_bytes()[..3].iter().all(u8::is_ascii_digit)
+                && !is_standard_note(header, &data)
+            {
+                let measure = self.measure_number(line, header)?;
+                let length = parse_position(&data).map_err(|_| SusError::InvalidValue {
+                    line,
+                    value: data.clone(),
+                })?;
+                self.chart
+                    .set_measure_length(measure, length)
+                    .map_err(|source| SusError::Chart { line, source })?;
+                self.timeline.set_length(measure, length);
+            }
+        }
+        self.measure_base = 0;
+        Ok(())
+    }
+
+    fn parse_measure_base(&mut self, line: usize, command: &str) -> Result<(), SusError> {
+        let value = command
+            .split_whitespace()
+            .nth(1)
+            .ok_or(SusError::MalformedCommand { line })?;
+        self.measure_base = value.parse().map_err(|_| SusError::InvalidValue {
+            line,
+            value: value.to_owned(),
+        })?;
+        Ok(())
+    }
+
+    fn measure_number(&self, line: usize, header: &str) -> Result<u32, SusError> {
+        self.measure_base
+            .checked_add(
+                header[..3]
+                    .parse::<u32>()
+                    .map_err(|_| SusError::MalformedCommand { line })?,
+            )
+            .ok_or_else(|| SusError::InvalidValue {
+                line,
+                value: header[..3].to_owned(),
+            })
     }
 
     fn resolve_standard_air(&mut self) -> Result<(), SusError> {
@@ -331,14 +384,13 @@ impl Parser {
         data: &str,
     ) -> Result<(), SusError> {
         if data.len() == 4 && &data[..2] == "08" {
-            let bpm =
-                *self
-                    .bpm_definitions
-                    .get(&data[2..])
-                    .ok_or_else(|| SusError::InvalidValue {
-                        line,
-                        value: data.to_owned(),
-                    })?;
+            let bpm = *self
+                .bpm_definitions
+                .get(&parse_definition_id(line, &data[2..])?)
+                .ok_or_else(|| SusError::InvalidValue {
+                    line,
+                    value: data.to_owned(),
+                })?;
             let position = self
                 .timeline
                 .position_from_ticks(
@@ -724,7 +776,8 @@ impl Parser {
             line,
             value: data.to_owned(),
         })?;
-        self.bpm_definitions.insert(header[3..].to_owned(), bpm);
+        self.bpm_definitions
+            .insert(parse_definition_id(line, &header[3..])?, bpm);
         Ok(())
     }
 
@@ -780,27 +833,10 @@ impl Parser {
     }
 
     fn parse_data_line(&mut self, line: usize, header: &str, data: &str) -> Result<(), SusError> {
-        let measure = self
-            .measure_base
-            .checked_add(
-                header[..3]
-                    .parse::<u32>()
-                    .map_err(|_| SusError::MalformedCommand { line })?,
-            )
-            .ok_or(SusError::InvalidValue {
-                line,
-                value: header[..3].to_owned(),
-            })?;
+        let measure = self.measure_number(line, header)?;
         let kind = &header[3..];
         if kind == "02" {
-            let length = parse_position(data).map_err(|_| SusError::InvalidValue {
-                line,
-                value: data.to_owned(),
-            })?;
-            self.timeline.set_length(measure, length);
-            self.chart
-                .set_measure_length(measure, length)
-                .map_err(|source| SusError::Chart { line, source })?;
+            // Measure definitions were resolved before any event positions.
             return Ok(());
         }
         if kind == "08" {
@@ -813,18 +849,29 @@ impl Parser {
             });
         }
 
-        let channel = kind.chars().nth(2);
+        let channel = kind
+            .chars()
+            .nth(2)
+            .map(|channel| channel.to_ascii_uppercase());
         let note_kind = kind.chars().next().unwrap();
         let lane = base36(kind.chars().nth(1).unwrap(), line)?;
         let positions = self.positions(line, measure, data)?;
         match note_kind {
             '1' => self.parse_short_notes(line, lane, data, positions),
-            '2' if self.mode == ChartMode::Xlair => {
-                self.parse_side_long(line, lane, channel.unwrap(), data, positions)
-            }
-            '2' => self.parse_central_hold(line, lane, channel.unwrap(), data, positions),
-            '3' => self.parse_slider(line, lane, channel.unwrap(), data, positions),
-            '4' => self.parse_slider(line, lane, channel.unwrap(), data, positions),
+            '2' => self.parse_hold(
+                line,
+                lane,
+                channel.ok_or(SusError::MalformedCommand { line })?,
+                data,
+                positions,
+            ),
+            '3' | '4' => self.parse_slider(
+                line,
+                lane,
+                channel.ok_or(SusError::MalformedCommand { line })?,
+                data,
+                positions,
+            ),
             '5' => self.parse_directional_notes(line, lane, data, positions),
             _ => Err(SusError::UnsupportedCommand {
                 line,
@@ -847,7 +894,7 @@ impl Parser {
             }
             let bpm = *self
                 .bpm_definitions
-                .get(key)
+                .get(&parse_definition_id(line, key)?)
                 .ok_or_else(|| SusError::InvalidValue {
                     line,
                     value: key.to_owned(),
@@ -1013,7 +1060,7 @@ impl Parser {
         Ok(())
     }
 
-    fn parse_side_long(
+    fn parse_hold(
         &mut self,
         line: usize,
         lane: u8,
@@ -1025,78 +1072,54 @@ impl Parser {
             if token[0] == b'0' {
                 continue;
             }
-            let kind = token[0];
-            if kind == b'1' {
-                let button = side_button(lane).ok_or_else(|| SusError::InvalidValue {
-                    line,
-                    value: lane.to_string(),
-                })?;
-                if self.pending_side_longs.contains_key(&channel) {
-                    return Err(SusError::InvalidValue {
-                        line,
-                        value: channel.to_string(),
-                    });
-                }
-                self.pending_side_longs.insert(
-                    channel,
-                    PendingSlide {
-                        points: vec![SlidePoint::new(position, Lane::Side(button))],
-                        side_button: Some(button),
-                    },
-                );
-            } else if kind == b'2' {
-                let pending = self
-                    .pending_side_longs
-                    .remove(&channel)
-                    .ok_or(SusError::MissingStart { line, channel })?;
-                let point = SlidePoint::new(position, Lane::Side(pending.side_button.unwrap()));
-                self.add_note(
-                    line,
-                    Note::new(
-                        pending.points[0].position(),
-                        pending.points[0].lane(),
-                        NoteKind::Hold {
-                            end: point.position(),
-                            checkpoints: pending.points[1..]
-                                .iter()
-                                .map(SlidePoint::position)
-                                .collect(),
-                        },
-                    )
-                    .map_err(|source| SusError::Chart { line, source })?,
-                )?;
-            } else if kind == b'3' {
-                let pending = self
-                    .pending_side_longs
-                    .get_mut(&channel)
-                    .ok_or(SusError::MissingStart { line, channel })?;
-                pending.points.push(SlidePoint::new(
-                    position,
-                    Lane::Side(pending.side_button.unwrap()),
-                ));
-            } else {
+            if !matches!(token[0], b'1'..=b'3') {
                 return Err(invalid_token(line, token));
             }
+            self.hold_events.push(HoldEvent {
+                line,
+                channel,
+                position,
+                lane,
+                width: base36_byte(token[1], line)?,
+                kind: token[0],
+                attributes: self.current_attributes.unwrap_or_default(),
+                speed_group: self.current_speed_group,
+            });
         }
         Ok(())
     }
 
-    fn parse_central_hold(
-        &mut self,
-        line: usize,
-        lane: u8,
-        channel: char,
-        data: &str,
-        positions: Vec<Position>,
-    ) -> Result<(), SusError> {
-        for (token, position) in data.as_bytes().chunks(2).zip(positions) {
-            if token[0] == b'0' {
-                continue;
-            }
-            let width = base36_byte(token[1], line)?;
-            let note_lane =
-                Lane::slider(lane, width).map_err(|source| SusError::Chart { line, source })?;
-            match token[0] {
+    fn resolve_holds(&mut self) -> Result<(), SusError> {
+        self.hold_events
+            .sort_by_key(|event| (event.position, event.line));
+        for event in std::mem::take(&mut self.hold_events) {
+            let HoldEvent {
+                line,
+                channel,
+                position,
+                ..
+            } = event;
+            let lane = if self.mode == ChartMode::Xlair {
+                if event.kind == b'1' {
+                    Lane::Side(
+                        side_button(event.lane).ok_or_else(|| SusError::InvalidValue {
+                            line,
+                            value: event.lane.to_string(),
+                        })?,
+                    )
+                } else {
+                    // Only the start lane selects a physical side button.
+                    self.pending_holds
+                        .get(&channel)
+                        .ok_or(SusError::MissingStart { line, channel })?
+                        .points[0]
+                        .lane()
+                }
+            } else {
+                Lane::slider(event.lane, event.width)
+                    .map_err(|source| SusError::Chart { line, source })?
+            };
+            match event.kind {
                 b'1' => {
                     if self.pending_holds.contains_key(&channel) {
                         return Err(SusError::InvalidValue {
@@ -1107,8 +1130,7 @@ impl Parser {
                     self.pending_holds.insert(
                         channel,
                         PendingSlide {
-                            points: vec![SlidePoint::new(position, note_lane)],
-                            side_button: None,
+                            points: vec![SlidePoint::new(position, lane)],
                         },
                     );
                 }
@@ -1117,30 +1139,32 @@ impl Parser {
                         .pending_holds
                         .remove(&channel)
                         .ok_or(SusError::MissingStart { line, channel })?;
-                    self.add_note(
-                        line,
-                        Note::new(
-                            pending.points[0].position(),
-                            pending.points[0].lane(),
-                            NoteKind::Hold {
-                                end: position,
-                                checkpoints: pending.points[1..]
-                                    .iter()
-                                    .map(SlidePoint::position)
-                                    .collect(),
-                            },
-                        )
-                        .map_err(|source| SusError::Chart { line, source })?,
-                    )?;
+                    let note = Note::new(
+                        pending.points[0].position(),
+                        pending.points[0].lane(),
+                        NoteKind::Hold {
+                            end: position,
+                            checkpoints: pending.points[1..]
+                                .iter()
+                                .map(SlidePoint::position)
+                                .collect(),
+                        },
+                    )
+                    .map_err(|source| SusError::Chart { line, source })?
+                    .with_attributes(event.attributes);
+                    let note_id = self.chart.add_note(note);
+                    self.chart
+                        .set_note_speed_group(note_id, event.speed_group)
+                        .map_err(|source| SusError::Chart { line, source })?;
                 }
                 b'3' => {
                     let pending = self
                         .pending_holds
                         .get_mut(&channel)
                         .ok_or(SusError::MissingStart { line, channel })?;
-                    pending.points.push(SlidePoint::new(position, note_lane));
+                    pending.points.push(SlidePoint::new(position, lane));
                 }
-                _ => return Err(invalid_token(line, token)),
+                _ => unreachable!(),
             }
         }
         Ok(())
@@ -1191,7 +1215,7 @@ impl Parser {
                     }
                     self.pending_sliders.insert(
                         event.channel,
-                        PendingSlider {
+                        PendingSlide {
                             points: vec![SlidePoint::new(event.position, event.lane)],
                         },
                     );
@@ -1357,14 +1381,33 @@ fn base36(value: char, line: usize) -> Result<u8, SusError> {
     base36_byte(value as u8, line)
 }
 
-fn parse_group(line: usize, value: &str) -> Result<u32, SusError> {
+fn is_standard_note(header: &str, data: &str) -> bool {
+    header.len() == 5
+        && header.chars().all(|c| c.is_ascii_hexdigit())
+        && !header.ends_with("08")
+        && (data.len() >= 6 || (data.len() == 4 && data.starts_with("08")))
+        && data
+            .get(..2)
+            .and_then(|code| u8::from_str_radix(code, 16).ok())
+            .is_some_and(|code| {
+                matches!(
+                    code,
+                    0x01 | 0x02 | 0x03 | 0x05 | 0x06 | 0x07 | 0x08 | 0x09 | 0x10
+                )
+            })
+}
+
+fn parse_definition_id(line: usize, value: &str) -> Result<u32, SusError> {
     if value.len() != 2 {
         return Err(SusError::MalformedCommand { line });
     }
     let high = u32::from(base36_byte(value.as_bytes()[0], line)?);
     let low = u32::from(base36_byte(value.as_bytes()[1], line)?);
-    let group = high * 36 + low;
-    group
+    Ok(high * 36 + low)
+}
+
+fn parse_group(line: usize, value: &str) -> Result<u32, SusError> {
+    parse_definition_id(line, value)?
         .checked_sub(1)
         .ok_or(SusError::MalformedCommand { line })
 }
