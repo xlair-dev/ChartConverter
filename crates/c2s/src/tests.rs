@@ -270,7 +270,7 @@ fn omits_slide_point_kinds_that_c2s_cannot_represent() {
     let points = vec![
         SlidePoint::new(Position::new(0, 1).unwrap(), Lane::slider(0, 4).unwrap()),
         SlidePoint::new(Position::new(1, 1).unwrap(), Lane::slider(4, 4).unwrap())
-            .with_kind(SlidePointKind::Invisible),
+            .with_kind(SlidePointKind::Visible),
         SlidePoint::new(Position::new(2, 1).unwrap(), Lane::slider(8, 4).unwrap()),
     ];
     let mut chart = Chart::new();
@@ -285,6 +285,116 @@ fn omits_slide_point_kinds_that_c2s_cannot_represent() {
 
     let c2s = write(&chart).expect("unsupported slide is omitted");
     assert_eq!(c2s, "RESOLUTION\t384\n");
+}
+
+#[test]
+fn preserves_finer_paths_tempo_holds_and_speed_assignments() {
+    let source = concat!(
+        "RESOLUTION\t1920\n",
+        "SLC\t0\t0\t0\t2\t48\t2\t2\n",
+        "SLD\t0\t48\t2\t2\t48\t4\t2\n",
+        "BPM\t0\t48\t135\n",
+        "TAP\t0\t48\t6\t2\n",
+        "HLD\t0\t96\t8\t2\t192\n",
+        "SLP\t0\t0\t96\t1.5\t7\n",
+        "SLA\t0\t0\t0\t2\t96\t7\n",
+    );
+    let chart = parse(source).unwrap();
+    assert_eq!(
+        chart.note_speed_group(chart::NoteId::new(0)).unwrap(),
+        Some(7)
+    );
+    let output = write(&chart).unwrap();
+    assert!(output.starts_with("RESOLUTION\t1920\n"));
+    let restored = parse(&output).unwrap();
+    assert_eq!(restored.notes(), chart.notes());
+    assert_eq!(restored.tempo_changes(), chart.tempo_changes());
+    assert_eq!(
+        restored.scroll_speed_changes(),
+        chart.scroll_speed_changes()
+    );
+    assert_eq!(
+        restored.note_speed_group(chart::NoteId::new(0)).unwrap(),
+        Some(7)
+    );
+}
+
+#[test]
+fn applies_speed_assignments_using_the_input_resolution() {
+    // A resolution need not be divisible by four. Compare in its own tick scale,
+    // rather than the writer's former hard-coded 96 ticks per beat.
+    let source = concat!(
+        "RESOLUTION\t5\n",
+        "SLC\t0\t0\t0\t2\t1\t2\t2\n",
+        "SLD\t0\t1\t2\t2\t1\t4\t2\n",
+        "SLP\t0\t0\t2\t1.5\t7\n",
+        "SLA\t0\t0\t0\t2\t2\t7\n",
+    );
+    let chart = parse(source).unwrap();
+    assert_eq!(
+        chart.note_speed_group(chart::NoteId::new(0)).unwrap(),
+        Some(7)
+    );
+    let restored = parse(&write(&chart).unwrap()).unwrap();
+    assert_eq!(restored.notes(), chart.notes());
+    assert_eq!(
+        restored.scroll_speed_changes(),
+        chart.scroll_speed_changes()
+    );
+    assert_eq!(
+        restored.note_speed_group(chart::NoteId::new(0)).unwrap(),
+        Some(7)
+    );
+}
+
+#[test]
+fn extends_resolution_for_scroll_durations_without_fractional_note_positions() {
+    let mut chart = Chart::new();
+    chart.add_scroll_speed_change(
+        ScrollSpeedChange::with_duration(
+            Position::new(0, 1).unwrap(),
+            1.5,
+            ScrollScope::Global,
+            Position::new(1, 5).unwrap(),
+        )
+        .unwrap(),
+    );
+    let output = write(&chart).unwrap();
+    assert!(output.starts_with("RESOLUTION\t1920\n"));
+    assert_eq!(
+        parse(&output).unwrap().scroll_speed_changes(),
+        chart.scroll_speed_changes()
+    );
+}
+
+#[test]
+fn preserves_air_timing_and_interval_codes_with_extended_resolution() {
+    let source = concat!(
+        "RESOLUTION\t1920\n",
+        "TAP\t0\t0\t0\t4\n",
+        "ALD\t0\t48\t0\t4\t24\t5\t48\t4\t4\t6\tPPL\n",
+        "AHD\t0\t96\t0\t4\tTAP\t48\tDEF\n",
+        "ASD\t0\t144\t0\t4\tTAP\t2\t48\t4\t4\t2.5\tDEF\n",
+    );
+    let chart = parse(source).unwrap();
+    let output = write(&chart).unwrap();
+    assert!(output.starts_with("RESOLUTION\t1920\n"));
+    assert!(output.contains("ALD\t0\t48\t0\t4\t24\t"));
+    assert_eq!(parse(&output).unwrap().notes(), chart.notes());
+}
+
+#[test]
+fn reports_output_resolution_overflow_instead_of_dropping_notes() {
+    let mut chart = Chart::new();
+    chart.add_note(
+        Note::new(
+            Position::new(1, u64::MAX).unwrap(),
+            Lane::slider(0, 1).unwrap(),
+            NoteKind::Tap(TapKind::Tap),
+        )
+        .unwrap(),
+    );
+    assert_eq!(write(&chart), Err(crate::C2sError::UnrepresentablePosition));
 }
 
 #[test]

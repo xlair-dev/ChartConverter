@@ -2,13 +2,13 @@ use std::collections::BTreeSet;
 
 use chart::{
     AirColor, AirCrushColor, AirCrushInterval, AirDirection, Chart, ChartMode, ExDirection, Lane,
-    Note, NoteId, NoteKind, Position, ScrollScope, SlidePoint, SlidePointKind, TapKind,
-    report_loss,
+    Note, NoteId, NoteKind, ScrollScope, SlidePoint, SlidePointKind, TapKind, report_loss,
 };
 
-use crate::C2sError;
+use crate::{C2sError, timing::Timing};
 
 pub(super) fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, C2sError> {
+    let timing = Timing::for_chart(chart)?;
     if chart.priority_enabled().is_some() {
         report_loss("C2S", "SUS enable_priority request");
     }
@@ -21,7 +21,7 @@ pub(super) fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, 
     let mut records = Vec::new();
     let mut speed_groups = BTreeSet::new();
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {
-        match output_position(tempo.position()) {
+        match timing.position(tempo.position()) {
             Ok((measure, tick)) => records.push(Record::new(
                 measure,
                 tick,
@@ -34,12 +34,12 @@ pub(super) fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, 
     }
     for (index, change) in chart.scroll_speed_changes().iter().enumerate() {
         let record = (|| {
-            let (measure, tick) = output_position(change.position())?;
+            let (measure, tick) = timing.position(change.position())?;
             let duration = change.duration().ok_or(C2sError::UnsupportedRecord {
                 line: 0,
                 record: "scroll speed without duration".to_owned(),
             })?;
-            let duration = output_ticks(duration)?;
+            let duration = timing.ticks(duration)?;
             let (kind, group) = match change.scope() {
                 ScrollScope::Global => ("SFL", None),
                 ScrollScope::Group(group) => ("SLP", Some(group.to_string())),
@@ -80,7 +80,15 @@ pub(super) fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, 
             );
         }
         let record_start = records.len();
-        match write_note(chart, index, note, &mut records, &speed_groups, mode) {
+        match write_note(
+            chart,
+            index,
+            note,
+            &mut records,
+            &speed_groups,
+            mode,
+            timing,
+        ) {
             Ok(()) => {}
             Err(error) if is_loss(&error) => {
                 records.truncate(record_start);
@@ -91,7 +99,7 @@ pub(super) fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, 
     }
     records.sort_by_key(|record| (record.measure, record.tick, record.order));
 
-    let mut output = String::from("RESOLUTION\t384\n");
+    let mut output = format!("RESOLUTION\t{}\n", timing.resolution());
     for record in records {
         output.push_str(&record.text);
         output.push('\n');
@@ -124,6 +132,7 @@ fn write_note(
     records: &mut Vec<Record>,
     speed_groups: &BTreeSet<u32>,
     mode: ChartMode,
+    timing: Timing,
 ) -> Result<(), C2sError> {
     if !note.attributes().is_empty() {
         report_loss("C2S", "SUS note attributes");
@@ -139,7 +148,7 @@ fn write_note(
     {
         return Err(unsupported("AIR notation in XLAIR mode"));
     }
-    let (measure, tick) = output_position(note.position())?;
+    let (measure, tick) = timing.position(note.position())?;
     let (lane, width) = c2s_lane(note.lane())?;
     let id = NoteId::new(index as u32);
     let text = match note.kind() {
@@ -174,7 +183,7 @@ fn write_note(
             }
             format!(
                 "HLD\t{measure}\t{tick}\t{lane}\t{width}\t{}",
-                duration_ticks(note.position(), *end)?
+                timing.duration_ticks(note.position(), *end)?
             )
         }
         NoteKind::ExHold {
@@ -185,7 +194,7 @@ fn write_note(
             }
             format!(
                 "HLD\t{measure}\t{tick}\t{lane}\t{width}\t{}",
-                duration_ticks(note.position(), *end)?
+                timing.duration_ticks(note.position(), *end)?
             )
         }
         NoteKind::ExHold {
@@ -199,12 +208,14 @@ fn write_note(
             let direction = encode_ex_direction(*direction)?;
             format!(
                 "HXD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{direction}",
-                duration_ticks(note.position(), *end)?
+                timing.duration_ticks(note.position(), *end)?
             )
         }
-        NoteKind::Slide { points } => write_slide(points, None)?,
-        NoteKind::ExSlide { points, .. } if mode == ChartMode::Xlair => write_slide(points, None)?,
-        NoteKind::ExSlide { points, direction } => write_slide(points, Some(*direction))?,
+        NoteKind::Slide { points } => write_slide(points, None, timing)?,
+        NoteKind::ExSlide { points, .. } if mode == ChartMode::Xlair => {
+            write_slide(points, None, timing)?
+        }
+        NoteKind::ExSlide { points, direction } => write_slide(points, Some(*direction), timing)?,
         NoteKind::AirCrush {
             points,
             color,
@@ -218,10 +229,12 @@ fn write_note(
                 match interval {
                     AirCrushInterval::Trace => 0,
                     AirCrushInterval::Start => 9600,
-                    AirCrushInterval::Every(interval) => output_ticks(*interval)?,
+                    // ALD interval codes use their own 96-tick beat scale,
+                    // independently of the document's timestamp resolution.
+                    AirCrushInterval::Every(interval) => Timing::new(384).ticks(*interval)?,
                 },
                 points[0].height(),
-                duration_ticks(note.position(), end.position())?,
+                timing.duration_ticks(note.position(), end.position())?,
                 end.height(),
                 encode_air_crush_color(*color)
             )
@@ -248,7 +261,7 @@ fn write_note(
             format!(
                 "AHD\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{}\t{}",
                 parent_type(chart, *parent)?,
-                duration_ticks(note.position(), *end)?,
+                timing.duration_ticks(note.position(), *end)?,
                 encode_air_color(properties.color())
             )
         }
@@ -256,7 +269,7 @@ fn write_note(
             points,
             color,
             parent,
-        } => write_air_slide(points, *color, *parent, chart)?,
+        } => write_air_slide(points, *color, *parent, chart, timing)?,
     };
     records.push(Record::new(measure, tick, index, text));
     if let Some(group) = chart
@@ -270,7 +283,7 @@ fn write_note(
                 index,
                 format!(
                     "SLA\t{measure}\t{tick}\t{lane}\t{width}\t{}\t{group}",
-                    note_duration_ticks(note)?
+                    timing.note_duration_ticks(note)?
                 ),
             ));
         } else {
@@ -280,7 +293,11 @@ fn write_note(
     Ok(())
 }
 
-fn write_slide(points: &[SlidePoint], direction: Option<ExDirection>) -> Result<String, C2sError> {
+fn write_slide(
+    points: &[SlidePoint],
+    direction: Option<ExDirection>,
+    timing: Timing,
+) -> Result<String, C2sError> {
     if points.len() < 2 {
         return Err(unsupported("slide without an end point"));
     }
@@ -295,7 +312,7 @@ fn write_slide(points: &[SlidePoint], direction: Option<ExDirection>) -> Result<
     }
     if points[1..points.len() - 1]
         .iter()
-        .any(|point| point.kind() != &SlidePointKind::Control)
+        .any(|point| point.kind() == &SlidePointKind::Visible)
     {
         return Err(unsupported("slide control point kind"));
     }
@@ -303,7 +320,7 @@ fn write_slide(points: &[SlidePoint], direction: Option<ExDirection>) -> Result<
         .windows(2)
         .enumerate()
         .map(|(index, segment)| {
-            let (measure, tick) = output_position(segment[0].position())?;
+            let (measure, tick) = timing.position(segment[0].position())?;
             let (start_lane, start_width) = c2s_lane(segment[0].lane())?;
             let (end_lane, end_width) = c2s_lane(segment[1].lane())?;
             let kind = if index + 1 == points.len() - 1 {
@@ -313,7 +330,7 @@ fn write_slide(points: &[SlidePoint], direction: Option<ExDirection>) -> Result<
             };
             let mut record = format!(
                 "{kind}\t{measure}\t{tick}\t{start_lane}\t{start_width}\t{}\t{end_lane}\t{end_width}",
-                duration_ticks(segment[0].position(), segment[1].position())?
+                timing.duration_ticks(segment[0].position(), segment[1].position())?
             );
             if let Some(direction) = direction {
                 record.push('\t');
@@ -330,6 +347,7 @@ fn write_air_slide(
     color: AirColor,
     parent: NoteId,
     chart: &Chart,
+    timing: Timing,
 ) -> Result<String, C2sError> {
     if points.len() < 2 {
         return Err(unsupported("AIR Slide without an end point"));
@@ -346,7 +364,7 @@ fn write_air_slide(
         .map(|(index, segment)| {
             let start = &segment[0];
             let end = &segment[1];
-            let (measure, tick) = output_position(start.position())?;
+            let (measure, tick) = timing.position(start.position())?;
             let (start_lane, start_width) = c2s_lane(start.lane())?;
             let (end_lane, end_width) = c2s_lane(end.lane())?;
             let kind = "ASD";
@@ -358,7 +376,7 @@ fn write_air_slide(
             Ok(format!(
                 "{kind}\t{measure}\t{tick}\t{start_lane}\t{start_width}\t{target}\t{:.6}\t{}\t{end_lane}\t{end_width}\t{:.6}\t{}",
                 start.height(),
-                duration_ticks(start.position(), end.position())?,
+                timing.duration_ticks(start.position(), end.position())?,
                 end.height(),
                 encode_air_color(color)
             ))
@@ -393,50 +411,6 @@ fn c2s_lane(lane: Lane) -> Result<(u8, u8), C2sError> {
     match lane {
         Lane::Slider { start, width } => Ok((start, width)),
         Lane::Side(_) => Err(unsupported("side lane cannot be represented by C2S")),
-    }
-}
-
-fn output_position(position: Position) -> Result<(u32, u64), C2sError> {
-    let ticks = output_ticks(position)?;
-    Ok((
-        u32::try_from(ticks / 384).map_err(|_| C2sError::UnrepresentablePosition)?,
-        ticks % 384,
-    ))
-}
-
-fn output_ticks(position: Position) -> Result<u64, C2sError> {
-    let ticks = u128::from(position.numerator()) * 96;
-    let denominator = u128::from(position.denominator());
-    if ticks % denominator != 0 {
-        return Err(C2sError::UnrepresentablePosition);
-    }
-    u64::try_from(ticks / denominator).map_err(|_| C2sError::UnrepresentablePosition)
-}
-
-fn duration_ticks(start: Position, end: Position) -> Result<u64, C2sError> {
-    output_ticks(end)?
-        .checked_sub(output_ticks(start)?)
-        .ok_or(C2sError::UnrepresentablePosition)
-}
-
-pub(super) fn note_duration_ticks(note: &Note) -> Result<u64, C2sError> {
-    match note.kind() {
-        NoteKind::Hold { end, .. }
-        | NoteKind::ExHold { end, .. }
-        | NoteKind::AirHold { end, .. } => duration_ticks(note.position(), *end),
-        NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => {
-            let end = points.last().ok_or(C2sError::UnrepresentablePosition)?;
-            duration_ticks(note.position(), end.position())
-        }
-        NoteKind::AirSlide { points, .. } => {
-            let end = points.last().ok_or(C2sError::UnrepresentablePosition)?;
-            duration_ticks(note.position(), end.position())
-        }
-        NoteKind::AirCrush { points, .. } => {
-            let end = points.last().ok_or(C2sError::UnrepresentablePosition)?;
-            duration_ticks(note.position(), end.position())
-        }
-        _ => Ok(1),
     }
 }
 

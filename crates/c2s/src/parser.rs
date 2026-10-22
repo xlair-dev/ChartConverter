@@ -10,7 +10,7 @@ use crate::{
         parse_air_color, parse_air_crush_color, parse_air_direction, parse_air_height,
         parse_ex_direction, parse_u8, parse_u32, parse_u64,
     },
-    writer,
+    timing::Timing,
 };
 
 pub(super) fn parse(source: &str, mode: ChartMode) -> Result<Chart, C2sError> {
@@ -90,16 +90,15 @@ impl Parser {
             }
         }
 
-        if self.resolution.is_none() {
-            return Err(C2sError::MissingResolution);
-        }
+        let timing = Timing::new(self.resolution.ok_or(C2sError::MissingResolution)?);
         // C2S uses SLA duration as a lower bound; unmatched auxiliary records are ignorable.
         for index in 0..self.chart.notes().len() {
             let Some((line, group)) = self.speed_assignments.iter().find_map(
                 |(line, position, lane, duration, group)| {
                     (self.chart.notes()[index].position() == *position
                         && self.chart.notes()[index].lane() == *lane
-                        && writer::note_duration_ticks(&self.chart.notes()[index])
+                        && timing
+                            .note_duration_ticks(&self.chart.notes()[index])
                             .ok()
                             .is_some_and(|note_duration| note_duration <= *duration))
                     .then_some((*line, *group))

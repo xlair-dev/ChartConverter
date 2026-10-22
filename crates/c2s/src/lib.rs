@@ -4,6 +4,7 @@ use chart::{Chart, ChartMode};
 mod error;
 mod parser;
 mod syntax;
+mod timing;
 mod writer;
 
 pub use error::C2sError;
@@ -25,7 +26,9 @@ pub fn parse_with_diagnostics(source: &str, mode: ChartMode) -> chart::ParseRepo
 
 /// Writes the representable shared chart model as a C2S document.
 ///
-/// Unsupported or unrepresentable chart information is omitted and reported to stdout.
+/// The output resolution is extended from 384 ticks per measure as needed to
+/// preserve positions and durations. Resolution overflow returns an error.
+/// Unsupported or unrepresentable chart information is omitted and reported to stderr.
 pub fn write(chart: &Chart) -> Result<String, C2sError> {
     write_with_mode(chart, ChartMode::Normal)
 }
