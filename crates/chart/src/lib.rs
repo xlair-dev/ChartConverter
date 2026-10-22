@@ -3,6 +3,7 @@
 use std::fmt::Display;
 
 mod chart;
+mod diagnostic;
 mod error;
 mod note;
 mod position;
@@ -10,6 +11,7 @@ mod timeline;
 mod timing;
 
 pub use chart::{Chart, NoteId};
+pub use diagnostic::{Diagnostic, DiagnosticSeverity, ParseReport};
 pub use error::ChartError;
 pub use note::{
     AirColor, AirCrushColor, AirCrushInterval, AirCrushPoint, AirDirection, AirPoint,

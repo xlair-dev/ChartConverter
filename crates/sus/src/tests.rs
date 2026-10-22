@@ -6,6 +6,15 @@ use chart::{
 use super::{parse, parse_with_mode, write, write_with_mode};
 
 #[test]
+fn keeps_warnings_when_a_later_sus_record_fails() {
+    let report = super::parse_with_diagnostics("#00010:44\n#00010:xx\n", chart::ChartMode::Xlair);
+    assert!(report.result.is_err());
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(report.diagnostics[0].line, Some(1));
+    assert_eq!(report.diagnostics[0].format, "SUS");
+}
+
+#[test]
 fn parses_hispeed_ticks_as_beats_in_both_modes_and_variable_meters() {
     for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
         for resolution in [480, 960] {

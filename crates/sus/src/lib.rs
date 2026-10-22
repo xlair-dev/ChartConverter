@@ -19,6 +19,11 @@ pub fn parse_with_mode(source: &str, mode: ChartMode) -> Result<Chart, SusError>
     parser::parse(source, mode)
 }
 
+/// Parses without printing warnings; diagnostics also survive a parse failure.
+pub fn parse_with_diagnostics(source: &str, mode: ChartMode) -> chart::ParseReport<SusError> {
+    parser::parse_with_diagnostics(source, mode)
+}
+
 /// Writes a chart as a general SUS document.
 ///
 /// Unsupported or unrepresentable chart information is omitted and reported to stdout.

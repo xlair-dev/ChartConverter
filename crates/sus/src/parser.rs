@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use chart::{
-    AirDirection, AirProperties, Chart, ChartMode, ExDirection, Lane, Note, NoteAttributes, NoteId,
-    NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton, SlidePoint, SlidePointKind,
-    TapKind, TempoChange, report_loss,
+    AirDirection, AirProperties, Chart, ChartMode, Diagnostic, ExDirection, Lane, Note,
+    NoteAttributes, NoteId, NoteKind, ParseReport, Position, ScrollScope, ScrollSpeedChange,
+    SideButton, SlidePoint, SlidePointKind, TapKind, TempoChange,
 };
 
 use crate::{
@@ -12,7 +12,16 @@ use crate::{
 };
 
 pub(super) fn parse(source: &str, mode: ChartMode) -> Result<Chart, SusError> {
-    Parser::new(mode).parse(source)
+    parse_with_diagnostics(source, mode).into_result()
+}
+
+pub(super) fn parse_with_diagnostics(source: &str, mode: ChartMode) -> ParseReport<SusError> {
+    let mut parser = Parser::new(mode);
+    let result = parser.parse(source);
+    ParseReport {
+        result,
+        diagnostics: parser.diagnostics,
+    }
 }
 
 struct PendingSlide {
@@ -61,6 +70,7 @@ enum PendingStandardAir {
 
 pub(super) struct Parser {
     mode: ChartMode,
+    diagnostics: Vec<Diagnostic>,
     timeline: chart::MeasureTimeline,
     bpm_definitions: HashMap<u32, f64>,
     pending_holds: HashMap<char, PendingSlide>,
@@ -82,6 +92,7 @@ impl Parser {
     fn new(mode: ChartMode) -> Self {
         Self {
             mode,
+            diagnostics: Vec::new(),
             timeline: chart::MeasureTimeline::new(Position::new(4, 1).unwrap()),
             bpm_definitions: HashMap::new(),
             pending_holds: HashMap::new(),
@@ -99,7 +110,7 @@ impl Parser {
         }
     }
 
-    fn parse(mut self, source: &str) -> Result<Chart, SusError> {
+    fn parse(&mut self, source: &str) -> Result<Chart, SusError> {
         // Definitions describe the complete chart, while HISPEED/ATTRIBUTE and
         // MEASUREBS remain stateful commands interpreted in source order below.
         self.collect_definitions(source)?;
@@ -216,7 +227,7 @@ impl Parser {
             return Err(SusError::MissingEnd { channel });
         }
         self.resolve_standard_air()?;
-        Ok(self.chart)
+        Ok(std::mem::take(&mut self.chart))
     }
 
     fn collect_definitions(&mut self, source: &str) -> Result<(), SusError> {
@@ -474,7 +485,11 @@ impl Parser {
                 .map_err(|source| SusError::Chart { line, source })?,
             ),
             0x10 if self.mode == ChartMode::Xlair => {
-                report_loss("SUS", "damage note in XLAIR mode");
+                self.diagnostics.push(Diagnostic::information_loss(
+                    "SUS",
+                    line,
+                    "damage note in XLAIR mode",
+                ));
                 Ok(())
             }
             0x10 => self.add_note(
@@ -483,13 +498,21 @@ impl Parser {
                     .map_err(|source| SusError::Chart { line, source })?,
             ),
             0x05 if self.mode == ChartMode::Xlair => {
-                report_loss("SUS", "slider hold in XLAIR mode");
+                self.diagnostics.push(Diagnostic::information_loss(
+                    "SUS",
+                    line,
+                    "slider hold in XLAIR mode",
+                ));
                 Ok(())
             }
             0x05 => self.parse_standard_hold(line, position, lane, data),
             0x06 => self.parse_standard_slide(line, position, lane, data),
             0x07 | 0x09 if self.mode == ChartMode::Xlair => {
-                report_loss("SUS", "AIR notation in XLAIR mode");
+                self.diagnostics.push(Diagnostic::information_loss(
+                    "SUS",
+                    line,
+                    "AIR notation in XLAIR mode",
+                ));
                 Ok(())
             }
             0x07 | 0x09 => {
@@ -511,7 +534,11 @@ impl Parser {
                 Ok(())
             }
             0x08 if self.mode == ChartMode::Xlair => {
-                report_loss("SUS", "AIR notation in XLAIR mode");
+                self.diagnostics.push(Diagnostic::information_loss(
+                    "SUS",
+                    line,
+                    "AIR notation in XLAIR mode",
+                ));
                 Ok(())
             }
             0x08 => self.parse_standard_air_hold(line, position, lane, data),
@@ -940,7 +967,11 @@ impl Parser {
                 continue;
             }
             if self.mode == ChartMode::Xlair && matches!(token[0], b'4'..=b'6') {
-                report_loss("SUS", "unsupported tap variant in XLAIR mode");
+                self.diagnostics.push(Diagnostic::information_loss(
+                    "SUS",
+                    line,
+                    "unsupported tap variant in XLAIR mode",
+                ));
                 continue;
             }
             let kind = match token[0] {
@@ -997,7 +1028,11 @@ impl Parser {
                 continue;
             }
             if matches!(token[0], b'1' | b'2') {
-                report_loss("SUS", "non-side AIR direction in XLAIR mode");
+                self.diagnostics.push(Diagnostic::information_loss(
+                    "SUS",
+                    line,
+                    "non-side AIR direction in XLAIR mode",
+                ));
                 continue;
             }
             let button = match token[0] {

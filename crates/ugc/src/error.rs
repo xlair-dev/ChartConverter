@@ -18,3 +18,16 @@ pub enum UgcError {
     #[error("position cannot be represented at the UGC resolution")]
     UnrepresentablePosition,
 }
+
+impl UgcError {
+    pub fn line(&self) -> Option<usize> {
+        match self {
+            Self::MalformedRecord { line, .. }
+            | Self::InvalidValue { line, .. }
+            | Self::UnsupportedRecord { line, .. }
+            | Self::Chart { line, .. }
+            | Self::MissingFollower { line, .. } => Some(*line),
+            _ => None,
+        }
+    }
+}

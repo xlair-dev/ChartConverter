@@ -1,18 +1,28 @@
 use chart::{
     AirColor, AirCrushColor, AirCrushInterval, AirCrushPoint, AirDirection, AirPoint,
-    AirProperties, Chart, ChartError, ChartMode, ExDirection, Lane, MeasureTimeline, Note, NoteId,
-    NoteKind, Position, ScrollScope, ScrollSpeedChange, SideButton, SlidePoint, SlidePointKind,
-    TapKind, TempoChange, report_loss,
+    AirProperties, Chart, ChartError, ChartMode, Diagnostic, ExDirection, Lane, MeasureTimeline,
+    Note, NoteId, NoteKind, ParseReport, Position, ScrollScope, ScrollSpeedChange, SideButton,
+    SlidePoint, SlidePointKind, TapKind, TempoChange,
 };
 
 use crate::{UgcError, syntax::is_xlair_side_air_direction};
 
 pub(super) fn parse(source: &str, mode: ChartMode) -> Result<Chart, UgcError> {
-    Parser::new(mode).parse(source)
+    parse_with_diagnostics(source, mode).into_result()
+}
+
+pub(super) fn parse_with_diagnostics(source: &str, mode: ChartMode) -> ParseReport<UgcError> {
+    let mut parser = Parser::new(mode);
+    let result = parser.parse(source);
+    ParseReport {
+        result,
+        diagnostics: parser.diagnostics,
+    }
 }
 
 pub(super) struct Parser {
     mode: ChartMode,
+    diagnostics: Vec<Diagnostic>,
     ticks_per_beat: u64,
     timeline: MeasureTimeline,
     chart: Chart,
@@ -32,6 +42,7 @@ impl Parser {
     fn new(mode: ChartMode) -> Self {
         Self {
             mode,
+            diagnostics: Vec::new(),
             ticks_per_beat: 480,
             timeline: MeasureTimeline::new(Position::new(4, 1).unwrap()),
             chart: Chart::new(),
@@ -42,7 +53,7 @@ impl Parser {
         }
     }
 
-    fn parse(mut self, source: &str) -> Result<Chart, UgcError> {
+    fn parse(&mut self, source: &str) -> Result<Chart, UgcError> {
         let lines: Vec<_> = source.lines().collect();
         // Header declarations apply to every timestamp, regardless of whether
         // BPM/TIL records precede BEAT/TICKS/FLAG in the file.
@@ -130,7 +141,7 @@ impl Parser {
             }
             index += consumed + 1;
         }
-        Ok(self.chart)
+        Ok(std::mem::take(&mut self.chart))
     }
 
     fn ex_long_carrier(&self, note: &Note) -> Option<(NoteId, ExDirection)> {
@@ -375,7 +386,11 @@ impl Parser {
                     },
                     'd' => {
                         if self.mode == ChartMode::Xlair {
-                            report_loss("UGC", "damage note in XLAIR mode");
+                            self.diagnostics.push(Diagnostic::information_loss(
+                                "UGC",
+                                line,
+                                "damage note in XLAIR mode",
+                            ));
                             return Ok((0, None));
                         }
                         let note = Note::new(position, lane, NoteKind::Mine)
@@ -399,7 +414,11 @@ impl Parser {
             }
             'C' => self.parse_air_crush(line, position, &code[1..3], &code[3..], following),
             'T' => {
-                report_loss("UGC", "unsupported legacy T note was omitted");
+                self.diagnostics.push(Diagnostic::information_loss(
+                    "UGC",
+                    line,
+                    "unsupported legacy T note was omitted",
+                ));
                 let consumed = self.skip_followers(line, following)?;
                 Ok((consumed, None))
             }
@@ -439,7 +458,11 @@ impl Parser {
         let lane = parse_lane(line, lane_code)?;
         let direction = parse_air_direction(line, attributes.get(..2).unwrap_or(""))?;
         if self.mode == ChartMode::Xlair && !is_xlair_side_air_direction(direction) {
-            report_loss("UGC", "non-side AIR notation in XLAIR mode");
+            self.diagnostics.push(Diagnostic::information_loss(
+                "UGC",
+                line,
+                "non-side AIR notation in XLAIR mode",
+            ));
             return Ok((0, None));
         }
         if self.mode == ChartMode::Xlair {
@@ -504,7 +527,11 @@ impl Parser {
         following: &[&str],
     ) -> Result<(usize, Option<Note>), UgcError> {
         if self.mode == ChartMode::Xlair {
-            report_loss("UGC", "AIR Crush notation in XLAIR mode");
+            self.diagnostics.push(Diagnostic::information_loss(
+                "UGC",
+                line,
+                "AIR Crush notation in XLAIR mode",
+            ));
             let consumed = self.skip_followers(line, following)?;
             return Ok((consumed, None));
         }
@@ -646,7 +673,11 @@ impl Parser {
         following: &[&str],
     ) -> Result<(usize, Option<Note>), UgcError> {
         if self.mode == ChartMode::Xlair {
-            report_loss("UGC", "AIR long notation in XLAIR mode");
+            self.diagnostics.push(Diagnostic::information_loss(
+                "UGC",
+                line,
+                "AIR long notation in XLAIR mode",
+            ));
             let consumed = self.skip_followers(line, following)?;
             return Ok((consumed, None));
         }
@@ -802,7 +833,11 @@ impl Parser {
                 match first_lane {
                     Lane::Slider { start, .. } => {
                         let Some(button) = SideButton::from_xlair_lane_start(start) else {
-                            report_loss("UGC", "slider hold in XLAIR mode");
+                            self.diagnostics.push(Diagnostic::information_loss(
+                                "UGC",
+                                line,
+                                "slider hold in XLAIR mode",
+                            ));
                             return Ok(ParsedLongNote {
                                 consumed,
                                 note: None,

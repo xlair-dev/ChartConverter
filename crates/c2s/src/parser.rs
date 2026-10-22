@@ -1,7 +1,7 @@
 use chart::{
-    AirCrushInterval, AirCrushPoint, AirProperties, Chart, ChartError, ChartMode, Lane, Note,
-    NoteId, NoteKind, Position, ScrollScope, ScrollSpeedChange, SlidePoint, SlidePointKind,
-    TapKind, TempoChange, report_loss,
+    AirCrushInterval, AirCrushPoint, AirProperties, Chart, ChartError, ChartMode, Diagnostic, Lane,
+    Note, NoteId, NoteKind, ParseReport, Position, ScrollScope, ScrollSpeedChange, SlidePoint,
+    SlidePointKind, TapKind, TempoChange,
 };
 
 use crate::{
@@ -14,11 +14,21 @@ use crate::{
 };
 
 pub(super) fn parse(source: &str, mode: ChartMode) -> Result<Chart, C2sError> {
-    Parser::new(mode).parse(source)
+    parse_with_diagnostics(source, mode).into_result()
+}
+
+pub(super) fn parse_with_diagnostics(source: &str, mode: ChartMode) -> ParseReport<C2sError> {
+    let mut parser = Parser::new(mode);
+    let result = parser.parse(source);
+    ParseReport {
+        result,
+        diagnostics: parser.diagnostics,
+    }
 }
 
 struct Parser {
     mode: ChartMode,
+    diagnostics: Vec<Diagnostic>,
     resolution: Option<u64>,
     timeline: chart::MeasureTimeline,
     chart: Chart,
@@ -36,6 +46,7 @@ impl Parser {
     fn new(mode: ChartMode) -> Self {
         Self {
             mode,
+            diagnostics: Vec::new(),
             resolution: None,
             timeline: chart::MeasureTimeline::new(Position::new(4, 1).unwrap()),
             chart: Chart::new(),
@@ -50,7 +61,7 @@ impl Parser {
         }
     }
 
-    fn parse(mut self, source: &str) -> Result<Chart, C2sError> {
+    fn parse(&mut self, source: &str) -> Result<Chart, C2sError> {
         for (line_index, raw_line) in source.lines().enumerate() {
             let line = line_index + 1;
             let fields: Vec<_> = raw_line.trim().split('\t').collect();
@@ -100,7 +111,7 @@ impl Parser {
                 .set_note_speed_group(NoteId::new(index as u32), Some(group))
                 .map_err(|source| C2sError::Chart { line, source })?;
         }
-        Ok(self.chart)
+        Ok(std::mem::take(&mut self.chart))
     }
 
     fn parse_resolution(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
@@ -209,7 +220,11 @@ impl Parser {
 
     fn parse_air(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
         if self.mode == ChartMode::Xlair {
-            report_loss("C2S", "AIR notation in XLAIR mode");
+            self.diagnostics.push(Diagnostic::information_loss(
+                "C2S",
+                line,
+                "AIR notation in XLAIR mode",
+            ));
             return Ok(());
         }
         let parent_type = *fields.get(5).ok_or(C2sError::MalformedRecord { line })?;
@@ -317,7 +332,11 @@ impl Parser {
             match lane {
                 Lane::Slider { start, .. } => {
                     let Some(button) = chart::SideButton::from_xlair_lane_start(start) else {
-                        report_loss("C2S", "slider hold in XLAIR mode");
+                        self.diagnostics.push(Diagnostic::information_loss(
+                            "C2S",
+                            line,
+                            "slider hold in XLAIR mode",
+                        ));
                         return Ok(());
                     };
                     Lane::Side(button)
@@ -457,7 +476,11 @@ impl Parser {
 
     fn parse_air_hold(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
         if self.mode == ChartMode::Xlair {
-            report_loss("C2S", "AIR notation in XLAIR mode");
+            self.diagnostics.push(Diagnostic::information_loss(
+                "C2S",
+                line,
+                "AIR notation in XLAIR mode",
+            ));
             return Ok(());
         }
         let (measure, tick) = self.location(line, fields)?;
@@ -501,7 +524,11 @@ impl Parser {
 
     fn parse_air_slide(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
         if self.mode == ChartMode::Xlair {
-            report_loss("C2S", "AIR notation in XLAIR mode");
+            self.diagnostics.push(Diagnostic::information_loss(
+                "C2S",
+                line,
+                "AIR notation in XLAIR mode",
+            ));
             return Ok(());
         }
         let (measure, tick) = self.location(line, fields)?;
@@ -614,7 +641,11 @@ impl Parser {
 
     fn parse_air_crush(&mut self, line: usize, fields: &[&str]) -> Result<(), C2sError> {
         if self.mode == ChartMode::Xlair {
-            report_loss("C2S", "AIR notation in XLAIR mode");
+            self.diagnostics.push(Diagnostic::information_loss(
+                "C2S",
+                line,
+                "AIR notation in XLAIR mode",
+            ));
             return Ok(());
         }
         let (measure, tick) = self.location(line, fields)?;
