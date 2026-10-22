@@ -360,20 +360,178 @@ fn xlair_side_taps_replace_overlapping_central_taps_in_either_record_order() {
 
 #[test]
 fn xlair_side_ex_taps_keep_the_xtap_parent_in_either_record_order() {
-    for source in ["#00110: 21\n#00150: 31", "#00150: 31\n#00110: 21"] {
-        let chart =
-            super::parse_with_mode(source, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
+    for request in [
+        "",
+        "#REQUEST \"xlair_directional_mode consume_tap\"\n",
+        "#REQUEST \"xlair_directional_mode independent\"\n",
+    ] {
+        for records in [
+            "#00110: 21\n#00150: 31",
+            "#00150: 31\n#00110: 21",
+            "#00110:28\n#00154:34",
+            "#00154:34\n#00110:28",
+        ] {
+            let source = format!("{request}{records}");
+            let chart =
+                super::parse_with_mode(&source, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
 
-        assert_eq!(chart.notes().len(), 2);
-        assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::XTap));
-        assert!(matches!(
-            chart.notes()[1].kind(),
-            NoteKind::Air {
-                properties,
-                parent,
-            } if properties.direction() == Some(chart::AirDirection::UpperLeft)
-                && *parent == chart::NoteId::new(0)
-        ));
+            assert_eq!(chart.notes().len(), 2);
+            assert_eq!(chart.notes()[0].kind(), &NoteKind::Tap(TapKind::XTap));
+            assert!(matches!(
+                chart.notes()[1].kind(),
+                NoteKind::Air {
+                    properties,
+                    parent,
+                } if properties.direction() == Some(chart::AirDirection::UpperLeft)
+                    && *parent == chart::NoteId::new(0)
+            ));
+        }
+    }
+}
+
+#[test]
+fn directional_modes_do_not_turn_a_non_overlapping_xtap_into_a_side_xtap() {
+    for mode in ["consume_tap", "independent"] {
+        for records in ["#00010:24\n#00058:34\n", "#00058:34\n#00010:24\n"] {
+            let source = format!("#REQUEST \"xlair_directional_mode {mode}\"\n{records}");
+            let chart = parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
+            assert_eq!(chart.notes().len(), 2);
+            assert!(
+                chart
+                    .notes()
+                    .iter()
+                    .any(|note| note.kind() == &NoteKind::Tap(TapKind::XTap))
+            );
+            assert!(
+                chart
+                    .notes()
+                    .iter()
+                    .any(|note| note.lane() == Lane::Side(SideButton::LeftUpper))
+            );
+            assert!(
+                !chart
+                    .notes()
+                    .iter()
+                    .any(|note| matches!(note.kind(), NoteKind::Air { .. }))
+            );
+        }
+    }
+}
+
+#[test]
+fn independent_directionals_keep_ordinary_taps_and_flicks_in_either_order() {
+    for kind in ['1', '3'] {
+        let tap = format!("#00010:{kind}4\n");
+        let side = "#00050:34\n";
+        for records in [format!("{tap}{side}"), format!("{side}{tap}")] {
+            let source = format!("#REQUEST \"xlair_directional_mode independent\"\n{records}");
+            let chart = parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
+            assert_eq!(chart.notes().len(), 2);
+            assert_eq!(
+                chart
+                    .notes()
+                    .iter()
+                    .filter(|note| matches!(note.lane(), Lane::Slider { .. }))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                chart
+                    .notes()
+                    .iter()
+                    .filter(|note| note.lane() == Lane::Side(SideButton::LeftUpper))
+                    .count(),
+                1
+            );
+            let output = write_with_mode(&chart, chart::ChartMode::Xlair).unwrap();
+            let restored = parse_with_mode(&output, chart::ChartMode::Xlair).unwrap();
+            assert_eq!(restored.notes().len(), 2, "{output}");
+        }
+    }
+}
+
+#[test]
+fn explicit_consume_tap_requires_tap_one_and_identical_geometry_and_timeline() {
+    for (tap, side, count) in [
+        ("#00010:14\n", "#00050:34\n", 1),
+        ("#00010:14\n", "#00050:33\n", 2),
+        ("#00010:14\n", "#00051:34\n", 2),
+        ("#00010:34\n", "#00050:34\n", 2),
+        ("#00010:14\n", "#00150:34\n", 2),
+        ("#HISPEED 00\n#00010:14\n", "#NOSPEED\n#00050:34\n", 2),
+    ] {
+        for records in [format!("{tap}{side}"), format!("{side}{tap}")] {
+            let source =
+                format!("#REQUEST \"xlair_directional_mode consume_tap\"\n#TIL00:\"\"\n{records}");
+            let chart = parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
+            assert_eq!(chart.notes().len(), count, "{source}");
+            assert_eq!(
+                chart
+                    .notes()
+                    .iter()
+                    .filter(|note| note.lane() == Lane::Side(SideButton::LeftUpper))
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_consume_tap_consumes_at_most_one_carrier_per_directional() {
+    for records in [
+        "#00010:14\n#00010:14\n#00050:34\n",
+        "#00050:34\n#00010:14\n#00010:14\n",
+        "#00010:14\n#00050:34\n#00010:14\n",
+    ] {
+        let source = format!("#REQUEST \"xlair_directional_mode consume_tap\"\n{records}");
+        let chart = parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(chart.notes().len(), 2, "{source}");
+        assert_eq!(
+            chart
+                .notes()
+                .iter()
+                .filter(|note| matches!(note.lane(), Lane::Slider { .. }))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn directional_request_is_case_insensitive_and_the_last_value_applies_to_the_whole_chart() {
+    for (last, count) in [("INDEPENDENT", 2), ("CONSUME_TAP", 1)] {
+        let source = format!(
+            "#REQUEST \"xlair_directional_mode consume_tap\"\n#00010:14\n#00050:34\n#REQUEST \"XLAIR_DIRECTIONAL_MODE {last}\"\n"
+        );
+        let chart = parse_with_mode(&source, chart::ChartMode::Xlair).unwrap();
+        assert_eq!(chart.notes().len(), count);
+    }
+}
+
+#[test]
+fn directional_request_does_not_change_normal_mode() {
+    let records = "#00010:14\n#00050:34\n";
+    let baseline = parse(records).unwrap();
+    for mode in ["consume_tap", "independent"] {
+        let source = format!("#REQUEST \"xlair_directional_mode {mode}\"\n{records}");
+        assert_eq!(parse(&source).unwrap(), baseline);
+    }
+}
+
+#[test]
+fn rejects_invalid_directional_requests_without_losing_previous_warnings() {
+    for request in [
+        "#REQUEST \"xlair_directional_mode invalid\"\n",
+        "#REQUEST \"xlair_directional_mode\"\n",
+        "#REQUEST xlair_directional_mode independent\n",
+        "#REQUEST \"xlair_directional_mode independent extra\"\n",
+    ] {
+        let source = format!("#00010:44\n{request}");
+        let report = super::parse_with_diagnostics(&source, chart::ChartMode::Xlair);
+        assert_eq!(report.result.unwrap_err().line(), Some(2));
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(report.diagnostics[0].line, Some(1));
     }
 }
 

@@ -4,6 +4,10 @@
 //! Speed-group IDs are IR-local: `00` is assigned an unused group without changing
 //! the existing `01`-to-group-0 mapping. SUS output uses only `01` through `zz`;
 //! writing all 1296 distinct groups is therefore an error. `NOSPEED` remains separate.
+//!
+//! `REQUEST "xlair_directional_mode consume_tap"` opts into exact Tap 1 carrier matching;
+//! `independent` preserves ordinary taps. Without a request, existing overlap rules apply.
+//! Side XTap pairs always retain their existing XTap-parent / directional-AIR-child IR.
 
 use chart::{Chart, ChartMode};
 

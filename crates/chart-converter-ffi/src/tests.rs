@@ -3,6 +3,45 @@ use std::ffi::CStr;
 use super::*;
 
 #[test]
+fn keeps_side_xtap_parent_contract_with_every_sus_directional_mode() {
+    for mode in [
+        "",
+        "#REQUEST \"xlair_directional_mode consume_tap\"\n",
+        "#REQUEST \"xlair_directional_mode independent\"\n",
+    ] {
+        for records in ["#00010:24\n#00050:34\n", "#00050:34\n#00010:24\n"] {
+            let source = format!("{mode}{records}");
+            let parsed = Parsed::new(CcFormat::Sus, source.as_bytes());
+            let view = parsed.view();
+            assert_eq!(view.note_count, 2);
+            let notes = unsafe { slice::from_raw_parts(view.notes, view.note_count) };
+            assert!(matches!(notes[0].kind, CcNoteKind::XTap));
+            assert!(matches!(notes[1].kind, CcNoteKind::Air));
+            assert_eq!(notes[1].parent, notes[0].id);
+            assert!(matches!(notes[1].air_direction, CcAirDirection::UpperLeft));
+            assert_eq!(unsafe { cc_result_diagnostics(parsed.0) }.count, 0);
+        }
+    }
+}
+
+#[test]
+fn exposes_opt_in_directional_modes_and_their_errors() {
+    for (mode, count) in [("consume_tap", 1), ("independent", 2)] {
+        let source = format!("#REQUEST \"xlair_directional_mode {mode}\"\n#00010:14\n#00050:34\n");
+        let parsed = Parsed::new(CcFormat::Sus, source.as_bytes());
+        assert_eq!(parsed.view().note_count, count);
+    }
+    let parsed = Parsed::new(
+        CcFormat::Sus,
+        b"#00010:14\n#REQUEST \"xlair_directional_mode invalid\"\n",
+    );
+    assert!(!unsafe { cc_result_error(parsed.0) }.is_null());
+    let diagnostics = unsafe { cc_result_diagnostics(parsed.0) };
+    assert_eq!(diagnostics.count, 1);
+    assert_eq!(unsafe { (*diagnostics.diagnostics).line }, 2);
+}
+
+#[test]
 fn exposes_sus_zero_timeline_as_a_distinct_group_in_notes_and_points() {
     let source = br#"#TIL00: "0'0:0.5"
 #TIL01: "0'0:2.0"

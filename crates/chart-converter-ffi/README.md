@@ -80,6 +80,28 @@ reserving all nonzero definitions and references, including later and empty ones
 SUS output uses only `01`–`zz`; charts requiring all 1296 output groups return an error
 rather than merging groups. Attribute IDs and empty BPM slots retain their previous rules.
 
+### SUS directional-note compatibility
+
+The default XLAIR-mode overlap rules and existing IR layouts are unchanged. A SUS
+document can explicitly select SheetsAnalyzer-compatible ordinary-tap handling:
+
+```sus
+#REQUEST "xlair_directional_mode consume_tap"
+```
+
+`consume_tap` removes at most one Tap 1 per directional note, and only when beat,
+lane start, width, and speed group all match. `independent` keeps ordinary taps and
+Flicks as separate notes. Names and values are case-insensitive; the last request
+applies to the whole document. Normal mode accepts the request without changing
+its general-purpose note interpretation. No request retains the existing behavior.
+
+Neither option disables side XTap pairing: an overlapping XTap and diagonal
+directional record still produce the existing XTap-parent / directional-AIR-child
+IR representation, in either record order. XLAIR must interpret that pair as a side
+XTap and not also emit its parent as a playable main-slider XTap. A non-overlapping
+XTap remains independent. SUS output adds `independent` when necessary to prevent
+already-resolved ordinary tap/side pairs from being merged on re-reading.
+
 ### C / C++ smoke tests
 
 The package script requires CMake plus C and C++ compilers and runs both smoke tests

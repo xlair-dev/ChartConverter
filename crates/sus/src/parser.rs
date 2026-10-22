@@ -50,6 +50,44 @@ struct SliderEvent {
     speed_group: Option<u32>,
 }
 
+#[derive(Clone, Copy, Default)]
+enum DirectionalMode {
+    /// Preserve ChartConverter's existing overlap-based interpretation unless explicitly overridden.
+    #[default]
+    Legacy,
+    ConsumeTap,
+    Independent,
+}
+
+impl DirectionalMode {
+    fn consumes(
+        self,
+        note: &Note,
+        note_group: Option<u32>,
+        lane: Lane,
+        group: Option<u32>,
+    ) -> bool {
+        match self {
+            Self::Legacy => matches!(note.kind(), NoteKind::Tap(_)) && lane.overlaps(note.lane()),
+            Self::ConsumeTap => {
+                note.kind() == &NoteKind::Tap(TapKind::Tap)
+                    && note.lane() == lane
+                    && note_group == group
+            }
+            Self::Independent => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SideTapRegion {
+    position: Position,
+    lane: Lane,
+    button: SideButton,
+    speed_group: Option<u32>,
+    carrier_consumed: bool,
+}
+
 enum PendingStandardAir {
     Tap {
         position: Position,
@@ -88,7 +126,8 @@ pub(super) struct Parser {
     chart: Chart,
     pending_standard_air: Vec<PendingStandardAir>,
     /// Geometry retained so side ExTap pairs resolve regardless of record order.
-    side_tap_regions: Vec<(Position, Lane, SideButton)>,
+    side_tap_regions: Vec<SideTapRegion>,
+    directional_mode: DirectionalMode,
 }
 
 impl Parser {
@@ -111,6 +150,7 @@ impl Parser {
             chart: Chart::new(),
             pending_standard_air: Vec::new(),
             side_tap_regions: Vec::new(),
+            directional_mode: DirectionalMode::default(),
         }
     }
 
@@ -243,6 +283,11 @@ impl Parser {
             let Some(command) = text.trim().strip_prefix('#').map(str::trim) else {
                 continue;
             };
+            // Like SheetsAnalyzer's document-level setting, the last valid request applies
+            // to the whole chart. Report invalid requests later in source order, not here.
+            if let Ok(Some(mode)) = parse_directional_mode(line, command) {
+                self.directional_mode = mode;
+            }
             // Reserve nonzero IDs before assigning 00, including empty definitions and
             // references that appear later. Leave malformed IDs to the main parsing pass.
             let speed_id = if command.starts_with("HISPEED") || command.starts_with("MEASUREHS") {
@@ -753,6 +798,9 @@ impl Parser {
     }
 
     fn parse_request(&mut self, line: usize, command: &str) -> Result<(), SusError> {
+        if parse_directional_mode(line, command)?.is_some() {
+            return Ok(());
+        }
         let value = command.trim_start_matches("REQUEST").trim();
         let fields: Vec<_> = value.trim_matches('"').split_whitespace().collect();
         if fields.len() == 2 && fields[0] == "enable_priority" {
@@ -1077,7 +1125,13 @@ impl Parser {
             let width = base36_byte(token[1], line)?;
             let source_lane =
                 Lane::slider(lane, width).map_err(|source| SusError::Chart { line, source })?;
-            self.side_tap_regions.push((position, source_lane, button));
+            self.side_tap_regions.push(SideTapRegion {
+                position,
+                lane: source_lane,
+                button,
+                speed_group: self.current_speed_group,
+                carrier_consumed: false,
+            });
             let side_note = Note::new(position, Lane::Side(button), NoteKind::Tap(TapKind::Tap))
                 .map_err(|source| SusError::Chart { line, source })?
                 .with_attributes(self.current_attributes.unwrap_or_default());
@@ -1087,9 +1141,19 @@ impl Parser {
                     .iter()
                     .enumerate()
                     .find_map(|(index, note)| {
+                        let group = self
+                            .chart
+                            .note_speed_group(NoteId::new(index as u32))
+                            .expect("note ID comes from this chart");
                         (note.position() == position
-                            && source_lane.overlaps(note.lane())
-                            && matches!(note.kind(), NoteKind::Tap(_)))
+                            && ((note.kind() == &NoteKind::Tap(TapKind::XTap)
+                                && source_lane.overlaps(note.lane()))
+                                || self.directional_mode.consumes(
+                                    note,
+                                    group,
+                                    source_lane,
+                                    self.current_speed_group,
+                                )))
                         .then_some(NoteId::new(index as u32))
                     });
             if let Some(note_id) = overlapping_tap {
@@ -1120,6 +1184,10 @@ impl Parser {
                 self.chart
                     .set_note_speed_group(note_id, self.current_speed_group)
                     .map_err(|source| SusError::Chart { line, source })?;
+                self.side_tap_regions
+                    .last_mut()
+                    .expect("just added region")
+                    .carrier_consumed = true;
             } else {
                 self.add_note(line, side_note)?;
             }
@@ -1376,8 +1444,8 @@ impl Parser {
             let paired_regions: Vec<_> = self
                 .side_tap_regions
                 .iter()
-                .filter(|(position, lane, _)| {
-                    *position == note.position() && lane.overlaps(note.lane())
+                .filter(|region| {
+                    region.position == note.position() && region.lane.overlaps(note.lane())
                 })
                 .copied()
                 .collect();
@@ -1392,7 +1460,7 @@ impl Parser {
                             && matches!(
                                 existing.lane(),
                                 Lane::Side(button)
-                                    if paired_regions.iter().any(|(_, _, paired)| paired == &button)
+                                    if paired_regions.iter().any(|region| region.button == button)
                             )
                             && matches!(existing.kind(), NoteKind::Tap(TapKind::Tap)))
                         .then_some(NoteId::new(index as u32))
@@ -1412,16 +1480,16 @@ impl Parser {
                 self.chart
                     .set_note_speed_group(note_id, self.current_speed_group)
                     .map_err(|source| SusError::Chart { line, source })?;
-                for (position, lane, button) in paired_regions {
-                    let direction = match button {
+                for region in paired_regions {
+                    let direction = match region.button {
                         SideButton::LeftUpper => AirDirection::UpperLeft,
                         SideButton::RightUpper => AirDirection::UpperRight,
                         SideButton::LeftLower => AirDirection::LowerLeft,
                         SideButton::RightLower => AirDirection::LowerRight,
                     };
                     let air = Note::new(
-                        position,
-                        lane,
+                        region.position,
+                        region.lane,
                         NoteKind::Air {
                             properties: AirProperties::new(direction),
                             parent: note_id,
@@ -1434,13 +1502,21 @@ impl Parser {
                 return Ok(());
             }
         }
-        if self.mode == ChartMode::Xlair
-            && matches!(note.kind(), NoteKind::Tap(_))
-            && self.side_tap_regions.iter().any(|(position, lane, _)| {
-                *position == note.position() && lane.overlaps(note.lane())
-            })
-        {
-            return Ok(());
+        if self.mode == ChartMode::Xlair {
+            let mode = self.directional_mode;
+            if let Some(region) = self.side_tap_regions.iter_mut().find(|region| {
+                region.position == note.position()
+                    && (!matches!(mode, DirectionalMode::ConsumeTap) || !region.carrier_consumed)
+                    && mode.consumes(
+                        &note,
+                        self.current_speed_group,
+                        region.lane,
+                        region.speed_group,
+                    )
+            }) {
+                region.carrier_consumed = true;
+                return Ok(());
+            }
         }
         let note_id = self
             .chart
@@ -1449,6 +1525,33 @@ impl Parser {
             .set_note_speed_group(note_id, self.current_speed_group)
             .map_err(|source| SusError::Chart { line, source })
     }
+}
+
+fn parse_directional_mode(line: usize, command: &str) -> Result<Option<DirectionalMode>, SusError> {
+    let Some(value) = command.strip_prefix("REQUEST").map(str::trim) else {
+        return Ok(None);
+    };
+    let fields: Vec<_> = value.trim_matches('"').split_whitespace().collect();
+    if !fields
+        .first()
+        .is_some_and(|name| name.eq_ignore_ascii_case("xlair_directional_mode"))
+    {
+        return Ok(None);
+    }
+    if fields.len() != 2 || !value.starts_with('"') || !value.ends_with('"') {
+        return Err(SusError::MalformedCommand { line });
+    }
+    let mode = match fields[1].to_ascii_lowercase().as_str() {
+        "consume_tap" => DirectionalMode::ConsumeTap,
+        "independent" => DirectionalMode::Independent,
+        _ => {
+            return Err(SusError::InvalidValue {
+                line,
+                value: fields[1].to_owned(),
+            });
+        }
+    };
+    Ok(Some(mode))
 }
 
 fn invalid_token(line: usize, token: &[u8]) -> SusError {

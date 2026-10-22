@@ -268,6 +268,25 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
         )
     });
     let mut output = format!("#REQUEST \"ticks_per_beat {ticks_per_beat}\"\n");
+    // These are already resolved IR notes, not editor carrier records. Protect any
+    // separate tap/side pair from being merged by the reader's legacy default.
+    if chart.notes().iter().any(|side| {
+        let Lane::Side(button) = side.lane() else {
+            return false;
+        };
+        let lane = Lane::slider(side_lane(button), 1).expect("valid side lane");
+        matches!(side.kind(), NoteKind::Tap(TapKind::Tap))
+            && chart.notes().iter().any(|tap| {
+                tap.position() == side.position()
+                    && lane.overlaps(tap.lane())
+                    && matches!(
+                        tap.kind(),
+                        NoteKind::Tap(TapKind::Tap | TapKind::Flick { .. })
+                    )
+            })
+    }) {
+        output.push_str("#REQUEST \"xlair_directional_mode independent\"\n");
+    }
     if let Some(enabled) = chart.priority_enabled() {
         output.push_str(&format!(
             "#REQUEST \"enable_priority {}\"\n",
