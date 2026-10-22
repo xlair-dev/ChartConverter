@@ -6,6 +6,7 @@ from pathlib import Path
 import runpy
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -13,9 +14,35 @@ from unittest import mock
 PACKAGE = runpy.run_path(str(Path(__file__).with_name("package-c-api.py")))
 RUN = PACKAGE["run"]
 MAIN = PACKAGE["main"]
+WRITE_CMAKE_CONFIG = PACKAGE["write_cmake_config"]
 
 
 class PackageCApiTests(unittest.TestCase):
+    def test_msvc_default_libraries_are_link_options_not_input_files(self):
+        for option in ["/defaultlib:libcmt", "/DEFAULTLIB:libcmt"]:
+            with self.subTest(option=option):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "cmake" / "ChartConverterFFIConfig.cmake"
+                    WRITE_CMAKE_CONFIG(path, "chart_converter_ffi.lib", f"kernel32.lib {option}")
+                    config = path.read_text(encoding="utf-8")
+                libraries = config.split("INTERFACE_LINK_LIBRARIES", 1)[1].split("  )", 1)[0]
+                options = config.split("INTERFACE_LINK_OPTIONS", 1)[1].split("  )", 1)[0]
+                self.assertIn('"kernel32.lib"', libraries)
+                self.assertNotIn(option, libraries)
+                self.assertIn(f'"{option}"', options)
+
+    def test_unix_absolute_library_paths_are_not_mistaken_for_msvc_options(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cmake" / "ChartConverterFFIConfig.cmake"
+            WRITE_CMAKE_CONFIG(path, "libchart_converter_ffi.a",
+                               "-lm /usr/lib/libSystem.dylib -framework CoreFoundation")
+            config = path.read_text(encoding="utf-8")
+        libraries = config.split("INTERFACE_LINK_LIBRARIES", 1)[1].split("  )", 1)[0]
+        options = config.split("INTERFACE_LINK_OPTIONS", 1)[1].split("  )", 1)[0]
+        self.assertIn('"m"', libraries)
+        self.assertIn('"/usr/lib/libSystem.dylib"', libraries)
+        self.assertIn('"SHELL:-framework CoreFoundation"', options)
+
     def test_success_returns_and_prints_output(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

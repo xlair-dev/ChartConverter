@@ -34,7 +34,7 @@ def write_cmake_config(path, library_name, native_libraries):
         elif argument.startswith("-l") and len(argument) > 2:
             link_libraries.append(argument[2:])
             index += 1
-        elif argument.startswith("-"):
+        elif argument.startswith("-") or argument.lower().startswith("/defaultlib:"):
             link_options.append(argument)
             index += 1
         else:
