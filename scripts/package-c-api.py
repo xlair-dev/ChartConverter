@@ -152,6 +152,14 @@ def main():
             native_libraries[0],
         )
 
+        smoke_build = staging / "smoke-build"
+        run([
+            "cmake", "-S", "crates/chart-converter-ffi/tests", "-B", str(smoke_build),
+            f"-DCMAKE_PREFIX_PATH={package_root}", "-DCMAKE_BUILD_TYPE=Release",
+        ])
+        run(["cmake", "--build", str(smoke_build), "--config", "Release"])
+        run(["ctest", "--test-dir", str(smoke_build), "-C", "Release", "--output-on-failure"])
+
         output_dir = Path("dist")
         output_dir.mkdir(exist_ok=True)
         archive = output_dir / f"chart-converter-ffi-{target}.zip"

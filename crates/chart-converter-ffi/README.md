@@ -74,6 +74,19 @@ Other format limitations (for example `SPDDEF`/`SPDFLD`) are unchanged.
 SUS definition IDs remain the specification's `01`–`zz`; this API extension does not
 add a compatibility mode for `TIL00`.
 
+### C / C++ smoke tests
+
+The package script requires CMake plus C and C++ compilers and runs both smoke tests
+against the packaged header, library, and imported CMake target before creating the ZIP.
+To test an extracted package manually:
+
+```sh
+cmake -S crates/chart-converter-ffi/tests -B build/c-api-smoke \
+  -DCMAKE_PREFIX_PATH=/absolute/path/to/extracted/package -DCMAKE_BUILD_TYPE=Release
+cmake --build build/c-api-smoke --config Release
+ctest --test-dir build/c-api-smoke -C Release --output-on-failure
+```
+
 Static consumers must link Rust's native platform dependencies. The generated CMake
 package carries the native link dependencies reported by Rust; Corrosion remains an
 option for consumers that build ChartConverter from source.
