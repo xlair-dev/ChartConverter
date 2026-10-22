@@ -8,7 +8,7 @@ use chart::{
 
 use crate::{
     SusError, curve,
-    syntax::{note_end_position, standard_parent_code},
+    syntax::{normalize_command, note_end_position, standard_parent_code},
 };
 
 pub(super) fn parse(source: &str, mode: ChartMode) -> Result<Chart, SusError> {
@@ -160,12 +160,13 @@ impl Parser {
         self.collect_definitions(source)?;
         for (line_index, raw_line) in source.lines().enumerate() {
             let line = line_index + 1;
-            let text = raw_line.trim();
-            if text.is_empty() || !text.starts_with('#') || text.starts_with("#COMMENT") {
+            let Some(command) = normalize_command(raw_line) else {
+                continue;
+            };
+            let command = command.as_ref();
+            if command.starts_with("COMMENT") {
                 continue;
             }
-
-            let command = text[1..].trim();
             if command.starts_with("REQUEST") {
                 self.parse_request(line, command)?;
                 continue;
@@ -280,9 +281,13 @@ impl Parser {
         let mut used_speed_groups = [false; 36 * 36 - 1];
         for (index, text) in source.lines().enumerate() {
             let line = index + 1;
-            let Some(command) = text.trim().strip_prefix('#').map(str::trim) else {
+            let Some(command) = normalize_command(text) else {
                 continue;
             };
+            let command = command.as_ref();
+            if command.starts_with("COMMENT") {
+                continue;
+            }
             // Like SheetsAnalyzer's document-level setting, the last valid request applies
             // to the whole chart. Report invalid requests later in source order, not here.
             if let Ok(Some(mode)) = parse_directional_mode(line, command) {
@@ -422,7 +427,7 @@ impl Parser {
                         || (note.position() == position && note.lane() == lane))
                         && target
                             .as_deref()
-                            .is_none_or(|target| standard_parent_code(note) == target)
+                            .is_none_or(|target| standard_parent_code(note).eq_ignore_ascii_case(target))
                         && !matches!(
                             note.kind(),
                             NoteKind::Air { .. }
@@ -803,8 +808,8 @@ impl Parser {
         }
         let value = command.trim_start_matches("REQUEST").trim();
         let fields: Vec<_> = value.trim_matches('"').split_whitespace().collect();
-        if fields.len() == 2 && fields[0] == "enable_priority" {
-            if let Some(enabled) = match fields[1] {
+        if fields.len() == 2 && fields[0].eq_ignore_ascii_case("enable_priority") {
+            if let Some(enabled) = match fields[1].to_ascii_lowercase().as_str() {
                 "0" | "false" => Some(false),
                 "1" | "true" => Some(true),
                 _ => None,
@@ -817,7 +822,7 @@ impl Parser {
                 value: fields[1].to_owned(),
             });
         }
-        if fields.len() != 2 || fields[0] != "ticks_per_beat" {
+        if fields.len() != 2 || !fields[0].eq_ignore_ascii_case("ticks_per_beat") {
             return Err(SusError::UnsupportedCommand {
                 line,
                 command: command.to_owned(),
@@ -1642,7 +1647,7 @@ fn parse_attributes(line: usize, value: &str) -> Result<NoteAttributes, SusError
             .split_once(':')
             .ok_or(SusError::MalformedCommand { line })?;
         let raw_value = raw_value.trim();
-        attributes = match key.trim() {
+        attributes = match key.trim().to_ascii_lowercase().as_str() {
             "rh" => attributes
                 .with_roll_speed(raw_value.parse().map_err(|_| SusError::InvalidValue {
                     line,

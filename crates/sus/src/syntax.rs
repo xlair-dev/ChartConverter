@@ -1,4 +1,20 @@
+use std::borrow::Cow;
+
 use chart::{Note, NoteKind, Position, SideButton, SlidePoint};
+
+/// Normalize only the directive/header token, never its string arguments.
+pub(super) fn normalize_command(line: &str) -> Option<Cow<'_, str>> {
+    let command = line.trim().strip_prefix('#')?.trim();
+    let end = command
+        .find(|c: char| c == ':' || c.is_whitespace())
+        .unwrap_or(command.len());
+    if !command.as_bytes()[..end].iter().any(u8::is_ascii_lowercase) {
+        return Some(Cow::Borrowed(command));
+    }
+    let mut normalized = command.to_owned();
+    normalized[..end].make_ascii_uppercase();
+    Some(Cow::Owned(normalized))
+}
 
 pub(super) fn standard_parent_code(note: &Note) -> &'static str {
     match note.kind() {
@@ -39,5 +55,26 @@ pub(super) fn side_direction(button: SideButton) -> char {
         SideButton::RightUpper => '4',
         SideButton::LeftLower => '5',
         SideButton::RightLower => '6',
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use super::normalize_command;
+
+    #[test]
+    fn normalizes_headers_without_rewriting_arguments() {
+        assert_eq!(
+            normalize_command("  #jAcKeT \"Images/MiXeD-日本語.png\"  ").unwrap(),
+            "JACKET \"Images/MiXeD-日本語.png\""
+        );
+        assert_eq!(normalize_command("#0003aa:12ab").unwrap(), "0003AA:12ab");
+        assert!(matches!(
+            normalize_command("#TITLE \"MiXeD\""),
+            Some(Cow::Borrowed(_))
+        ));
+        assert!(normalize_command("not a directive").is_none());
     }
 }
