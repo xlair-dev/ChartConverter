@@ -71,7 +71,7 @@ int main(void) {
 
     const char *source = "#WAVEOFFSET 0.5\n#BASEBPM 150\n"
                          "#REQUEST \"enable_priority false\"\n#00002:3\n"
-                         "#TIL01:\"0'0:1\"\n#HISPEED 01\n#00030A:14\n"
+                         "#TIL00:\"0'0:1\"\n#HISPEED 00\n#MEASUREHS 00\n#00030A:14\n"
                          "#NOSPEED\n#00134A:24\n";
     CcResult *result = cc_parse(CcFormat_Sus, CcMode_Xlair,
                                 (const uint8_t *)source, strlen(source));

@@ -1,4 +1,9 @@
 //! Parser and writer for the general SUS chart format and its XLAIR mode.
+//!
+//! Both modes accept Ched's `TIL00` / `HISPEED 00` / `MEASUREHS 00` notation.
+//! Speed-group IDs are IR-local: `00` is assigned an unused group without changing
+//! the existing `01`-to-group-0 mapping. SUS output uses only `01` through `zz`;
+//! writing all 1296 distinct groups is therefore an error. `NOSPEED` remains separate.
 
 use chart::{Chart, ChartMode};
 

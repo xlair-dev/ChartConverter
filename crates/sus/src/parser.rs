@@ -81,6 +81,8 @@ pub(super) struct Parser {
     ticks_per_beat: u64,
     measure_base: u32,
     current_speed_group: Option<u32>,
+    /// IR-local group reserved for Ched's non-standard TIL00, separate from NOSPEED.
+    zero_speed_group: u32,
     attribute_definitions: HashMap<String, NoteAttributes>,
     current_attributes: Option<NoteAttributes>,
     chart: Chart,
@@ -103,6 +105,7 @@ impl Parser {
             ticks_per_beat: 480,
             measure_base: 0,
             current_speed_group: None,
+            zero_speed_group: 0,
             attribute_definitions: HashMap::new(),
             current_attributes: None,
             chart: Chart::new(),
@@ -160,13 +163,15 @@ impl Parser {
                 continue;
             }
             if command.starts_with("HISPEED") {
-                self.current_speed_group = Some(parse_group(
-                    line,
-                    command
-                        .split_whitespace()
-                        .nth(1)
-                        .ok_or(SusError::MalformedCommand { line })?,
-                )?);
+                self.current_speed_group = Some(
+                    self.parse_speed_group(
+                        line,
+                        command
+                            .split_whitespace()
+                            .nth(1)
+                            .ok_or(SusError::MalformedCommand { line })?,
+                    )?,
+                );
                 continue;
             }
             if command == "NOSPEED" {
@@ -183,7 +188,7 @@ impl Parser {
                     .split_whitespace()
                     .nth(1)
                     .ok_or(SusError::MalformedCommand { line })?;
-                parse_group(line, value)?;
+                self.parse_speed_group(line, value)?;
                 continue;
             }
             if command.starts_with("ATR") {
@@ -232,11 +237,24 @@ impl Parser {
     }
 
     fn collect_definitions(&mut self, source: &str) -> Result<(), SusError> {
+        let mut used_speed_groups = [false; 36 * 36 - 1];
         for (index, text) in source.lines().enumerate() {
             let line = index + 1;
             let Some(command) = text.trim().strip_prefix('#').map(str::trim) else {
                 continue;
             };
+            // Reserve nonzero IDs before assigning 00, including empty definitions and
+            // references that appear later. Leave malformed IDs to the main parsing pass.
+            let speed_id = if command.starts_with("HISPEED") || command.starts_with("MEASUREHS") {
+                command.split_whitespace().nth(1)
+            } else {
+                command
+                    .split_once(':')
+                    .and_then(|(header, _)| header.trim().strip_prefix("TIL"))
+            };
+            if let Some(Ok(group)) = speed_id.map(|id| parse_group(line, id)) {
+                used_speed_groups[group as usize] = true;
+            }
             if command.starts_with("MEASUREBS") {
                 self.parse_measure_base(line, command)?;
                 continue;
@@ -264,8 +282,21 @@ impl Parser {
                 self.timeline.set_length(measure, length);
             }
         }
+        // If all 1295 specification IDs are occupied, the IR can still retain 00 as
+        // group 1295; a SUS writer cannot represent all 1296 groups and returns an error.
+        self.zero_speed_group = used_speed_groups
+            .iter()
+            .position(|used| !used)
+            .unwrap_or(used_speed_groups.len()) as u32;
         self.measure_base = 0;
         Ok(())
+    }
+
+    fn parse_speed_group(&self, line: usize, value: &str) -> Result<u32, SusError> {
+        match parse_definition_id(line, value)? {
+            0 => Ok(self.zero_speed_group),
+            id => Ok(id - 1),
+        }
     }
 
     fn parse_measure_base(&mut self, line: usize, command: &str) -> Result<(), SusError> {
@@ -834,7 +865,7 @@ impl Parser {
         if header.len() != 5 {
             return Err(SusError::MalformedCommand { line });
         }
-        let group = parse_group(line, &header[3..])?;
+        let group = self.parse_speed_group(line, &header[3..])?;
         let definition = data.trim_matches('"');
         if definition.is_empty() {
             return Ok(());

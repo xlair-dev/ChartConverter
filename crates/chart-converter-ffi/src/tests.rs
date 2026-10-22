@@ -3,6 +3,47 @@ use std::ffi::CStr;
 use super::*;
 
 #[test]
+fn exposes_sus_zero_timeline_as_a_distinct_group_in_notes_and_points() {
+    let source = br#"#TIL00: "0'0:0.5"
+#TIL01: "0'0:2.0"
+#HISPEED 00
+#MEASUREHS 00
+#00030A:14
+#HISPEED 01
+#00134A:34
+#NOSPEED
+#00238A:24
+"#;
+    for mode in [CcMode::Normal, CcMode::Xlair] {
+        let parsed = Parsed::with_mode(CcFormat::Sus, mode, source);
+        let view = parsed.view();
+        assert_eq!(view.note_count, 1);
+        let note = unsafe { &*view.notes };
+        assert_eq!(note.speed_group, 1);
+        let details = unsafe { &*cc_result_note_details(parsed.0, note.id) };
+        assert_eq!(details.point_count, note.point_count);
+        let points = unsafe { slice::from_raw_parts(details.points, details.point_count) };
+        assert_eq!(
+            points
+                .iter()
+                .map(|point| point.speed_group)
+                .collect::<Vec<_>>(),
+            vec![1, 0, -1]
+        );
+        let scrolls = unsafe { slice::from_raw_parts(view.scrolls, view.scroll_count) };
+        assert_eq!(scrolls.len(), 2);
+        assert!(
+            scrolls
+                .iter()
+                .all(|scroll| matches!(scroll.scope, CcScrollScope::Group))
+        );
+        assert_eq!((scrolls[0].target, scrolls[0].speed), (1, 0.5));
+        assert_eq!((scrolls[1].target, scrolls[1].speed), (0, 2.0));
+        assert_eq!(unsafe { cc_result_diagnostics(parsed.0) }.count, 0);
+    }
+}
+
+#[test]
 fn ex_long_replacement_keeps_start_and_point_groups() {
     let parsed = Parsed::with_mode(CcFormat::Ugc, CcMode::Normal,
         b"@TIL\t1\t0'0\t1.5\n@TIL\t2\t0'0\t2\n@ENDHEAD\n@USETIL\t1\n#0'0:x04L\n@USETIL\t2\n#0'0:s04\n@USETIL\t0\n#480>s44\n");

@@ -71,8 +71,14 @@ per-point groups but cannot represent SUS attributes; no-group notes/points fall
 to UGC timeline `0` and warn if that changes speed. C2S `SLA` applies to whole notes, so
 per-point overrides are reported as information loss rather than silently discarded.
 Other format limitations (for example `SPDDEF`/`SPDFLD`) are unchanged.
-SUS definition IDs remain the specification's `01`–`zz`; this API extension does not
-add a compatibility mode for `TIL00`.
+SUS parsing accepts Ched's `TIL00`, `HISPEED 00`, and `MEASUREHS 00` in both modes.
+Although the [SUS v2.7 specification](https://gist.github.com/kb10uy/c171c175ba913dc40a73c6ce69da9859)
+lists `01`–`zz`, [Ched exports timeline `00`](https://github.com/paralleltree/Ched/blob/master/Ched/Components/Exporter/SusExporter.cs#L83).
+It is a real speed group, not `NOSPEED` / `-1`. Group IDs are IR-local: existing
+nonzero SUS IDs keep their mappings, while `00` is assigned an unused group after
+reserving all nonzero definitions and references, including later and empty ones.
+SUS output uses only `01`–`zz`; charts requiring all 1296 output groups return an error
+rather than merging groups. Attribute IDs and empty BPM slots retain their previous rules.
 
 ### C / C++ smoke tests
 
