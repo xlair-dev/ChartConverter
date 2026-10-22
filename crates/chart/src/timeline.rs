@@ -49,6 +49,18 @@ impl MeasureTimeline {
         )
     }
 
+    /// Converts beat-based ticks without scaling them by the measure length.
+    /// Offsets may extend into later measures.
+    pub fn position_from_ticks(
+        &self,
+        measure: u32,
+        tick: u64,
+        ticks_per_beat: u64,
+    ) -> Result<Position, ChartError> {
+        self.position(measure, 0, 1)?
+            .checked_add(Position::new(tick, ticks_per_beat)?)
+    }
+
     /// Converts an absolute beat position into a measure and tick offset.
     ///
     /// `ticks_per_beat` is applied to each measure's actual length, so variable
@@ -122,5 +134,27 @@ mod tests {
             timeline.position(2, 1, 2).expect("valid position"),
             Position::new(17, 2).expect("valid position")
         );
+    }
+
+    #[test]
+    fn maps_beat_based_ticks_independently_of_measure_length() {
+        let mut timeline = MeasureTimeline::new(Position::new(4, 1).unwrap());
+        timeline.set_length(0, Position::new(3, 1).unwrap());
+        timeline.set_length(1, Position::new(5, 1).unwrap());
+        for resolution in [480, 960] {
+            for (measure, tick, expected) in [
+                (0, resolution / 2, Position::new(1, 2).unwrap()),
+                (1, resolution, Position::new(4, 1).unwrap()),
+                (0, resolution * 4, Position::new(4, 1).unwrap()),
+            ] {
+                assert_eq!(
+                    timeline
+                        .position_from_ticks(measure, tick, resolution)
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+        assert!(timeline.position_from_ticks(0, 0, 0).is_err());
     }
 }

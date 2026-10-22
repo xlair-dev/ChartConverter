@@ -341,7 +341,7 @@ impl Parser {
                     })?;
             let position = self
                 .timeline
-                .position(
+                .position_from_ticks(
                     self.measure_base
                         .checked_add(
                             u32::from_str_radix(&header[..2], 16)
@@ -353,12 +353,7 @@ impl Parser {
                         })?,
                     u64::from_str_radix(&header[2..], 16)
                         .map_err(|_| SusError::MalformedCommand { line })?,
-                    self.ticks_per_beat
-                        .checked_mul(4)
-                        .ok_or(SusError::InvalidValue {
-                            line,
-                            value: self.ticks_per_beat.to_string(),
-                        })?,
+                    self.ticks_per_beat,
                 )
                 .map_err(|source| SusError::Chart { line, source })?;
             self.chart.add_tempo_change(
@@ -379,16 +374,9 @@ impl Parser {
             })?;
         let tick = u64::from_str_radix(&header[2..], 16)
             .map_err(|_| SusError::MalformedCommand { line })?;
-        let ticks_per_measure =
-            self.ticks_per_beat
-                .checked_mul(4)
-                .ok_or(SusError::InvalidValue {
-                    line,
-                    value: self.ticks_per_beat.to_string(),
-                })?;
         let position = self
             .timeline
-            .position(measure, tick, ticks_per_measure)
+            .position_from_ticks(measure, tick, self.ticks_per_beat)
             .map_err(|source| SusError::Chart { line, source })?;
         let type_code = u8::from_str_radix(&data[..2], 16).map_err(|_| SusError::InvalidValue {
             line,
@@ -780,19 +768,9 @@ impl Parser {
                 line,
                 value: speed.to_owned(),
             })?;
-            let denominator = if self.mode == ChartMode::Normal {
-                self.ticks_per_beat
-                    .checked_mul(4)
-                    .ok_or(SusError::InvalidValue {
-                        line,
-                        value: self.ticks_per_beat.to_string(),
-                    })?
-            } else {
-                self.ticks_per_beat
-            };
             let position = self
                 .timeline
-                .position(measure, tick, denominator)
+                .position_from_ticks(measure, tick, self.ticks_per_beat)
                 .map_err(|source| SusError::Chart { line, source })?;
             let change = ScrollSpeedChange::with_scope(position, speed, ScrollScope::Group(group))
                 .map_err(|source| SusError::Chart { line, source })?;

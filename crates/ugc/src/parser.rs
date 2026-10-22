@@ -44,6 +44,18 @@ impl Parser {
 
     fn parse(mut self, source: &str) -> Result<Chart, UgcError> {
         let lines: Vec<_> = source.lines().collect();
+        // Header declarations apply to every timestamp, regardless of whether
+        // BPM/TIL records precede BEAT/TICKS/FLAG in the file.
+        for (index, text) in lines.iter().enumerate() {
+            let text = text.trim();
+            if text == "@ENDHEAD" {
+                break;
+            }
+            let (tag, _) = split_directive(text)?;
+            if matches!(tag, "@TICKS" | "@BEAT" | "@FLAG") {
+                self.parse_header(index + 1, text)?;
+            }
+        }
         let mut index = 0;
         while index < lines.len() {
             let line_number = index + 1;
@@ -56,7 +68,10 @@ impl Parser {
                 if line == "@ENDHEAD" {
                     self.in_header = false;
                 } else if line.starts_with('@') {
-                    self.parse_header(line_number, line)?;
+                    let (tag, _) = split_directive(line)?;
+                    if !matches!(tag, "@TICKS" | "@BEAT" | "@FLAG") {
+                        self.parse_header(line_number, line)?;
+                    }
                 } else {
                     return Err(UgcError::MalformedRecord { line: line_number });
                 }
@@ -819,21 +834,14 @@ impl Parser {
     }
 
     fn position(&self, line: usize, measure: u32, tick: u64) -> Result<Position, UgcError> {
-        let ticks_per_measure =
-            self.ticks_per_beat
-                .checked_mul(4)
-                .ok_or_else(|| UgcError::InvalidValue {
-                    line,
-                    value: self.ticks_per_beat.to_string(),
-                })?;
         let position = self
             .timeline
-            .position(measure, tick, ticks_per_measure)
+            .position_from_ticks(measure, tick, self.ticks_per_beat)
             .map_err(|source| UgcError::Chart { line, source })?;
         if self.offset_measure {
             let offset = self
                 .timeline
-                .position(1, 0, ticks_per_measure)
+                .position(1, 0, 1)
                 .map_err(|source| UgcError::Chart { line, source })?;
             position
                 .checked_add(offset)

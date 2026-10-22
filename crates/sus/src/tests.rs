@@ -6,6 +6,45 @@ use chart::{
 use super::{parse, parse_with_mode, write, write_with_mode};
 
 #[test]
+fn parses_hispeed_ticks_as_beats_in_both_modes_and_variable_meters() {
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        for resolution in [480, 960] {
+            let source = format!(
+                "#REQUEST \"ticks_per_beat {resolution}\"\n#00002:3\n#00102:5\n#TIL01:\"0'{}:0.5, 0'{}:2.0, 1'{}:1.5\"\n",
+                resolution / 2,
+                resolution * 4,
+                resolution / 2,
+            );
+            let chart = parse_with_mode(&source, mode).expect("beat-based speed positions");
+            let positions: Vec<_> = chart
+                .scroll_speed_changes()
+                .iter()
+                .map(|change| change.position())
+                .collect();
+            assert_eq!(
+                positions,
+                vec![
+                    Position::new(1, 2).unwrap(),
+                    Position::new(4, 1).unwrap(),
+                    Position::new(7, 2).unwrap()
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn parses_inline_note_and_bpm_ticks_in_variable_meters() {
+    let chart = parse("#00002:3\n#BPM01:120\n#000F0:0801\n#000F0:010008\n")
+        .expect("inline ticks are beat-based too");
+    assert_eq!(chart.notes()[0].position(), Position::new(1, 2).unwrap());
+    assert_eq!(
+        chart.tempo_changes()[0].position(),
+        Position::new(1, 2).unwrap()
+    );
+}
+
+#[test]
 fn parses_short_notes_and_variable_measure_lengths() {
     let chart = parse("#00002: 3.5\n#00110: 12\n#00114: 0031\n").expect("valid SUS");
 
@@ -74,7 +113,7 @@ fn increases_xlair_resolution_for_fine_note_positions() {
     let written = write_with_mode(&chart, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
     let reparsed = parse_with_mode(&written, chart::ChartMode::Xlair).expect("valid XLAIR SUS");
 
-    assert!(written.starts_with("#REQUEST \"ticks_per_beat 1920\""));
+    assert!(written.starts_with("#REQUEST \"ticks_per_beat 480\""));
     assert_eq!(reparsed.notes(), chart.notes());
 }
 
@@ -701,6 +740,38 @@ fn writes_speed_definitions_and_note_speed_groups() {
         super::parse_with_mode(&sus, chart::ChartMode::Xlair).expect("round-tripped speed output");
     assert_eq!(parsed.scroll_speed_changes(), chart.scroll_speed_changes());
     assert_eq!(parsed.note_speed_group(note_id).unwrap(), Some(35));
+}
+
+#[test]
+fn round_trips_fine_note_and_speed_ticks_in_variable_meters() {
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        for length in [Position::new(1, 1).unwrap(), Position::new(7, 2).unwrap()] {
+            let mut chart = Chart::new();
+            chart.set_measure_length(0, length).unwrap();
+            for position in [
+                Position::new(1, 128).unwrap(),
+                length.checked_add(Position::new(1, 128).unwrap()).unwrap(),
+            ] {
+                chart.add_tempo_change(TempoChange::new(position, 150.0).unwrap());
+                chart.add_scroll_speed_change(
+                    ScrollSpeedChange::with_scope(position, 1.5, ScrollScope::Group(0)).unwrap(),
+                );
+                chart.add_note(
+                    Note::new(
+                        position,
+                        Lane::slider(0, 4).unwrap(),
+                        NoteKind::Tap(TapKind::Tap),
+                    )
+                    .unwrap(),
+                );
+            }
+            let written = write_with_mode(&chart, mode).expect("fine beat-based ticks");
+            let parsed = parse_with_mode(&written, mode).expect("valid variable-meter output");
+            assert_eq!(parsed.tempo_changes(), chart.tempo_changes());
+            assert_eq!(parsed.scroll_speed_changes(), chart.scroll_speed_changes());
+            assert_eq!(parsed.notes(), chart.notes());
+        }
+    }
 }
 
 #[test]
