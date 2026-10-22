@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 
 use chart::{
-    AirDirection, Chart, ChartMode, ExDirection, Lane, MeasureTimeline, Note, NoteAttributes,
-    NoteId, NoteKind, Position, ScrollScope, SideButton, SlidePoint, SlidePointKind, TapKind,
-    report_loss,
+    AirColor, AirDirection, Chart, ChartMode, ExDirection, Lane, MeasureTimeline, Note,
+    NoteAttributes, NoteId, NoteKind, Position, ScrollScope, SideButton, SlidePoint,
+    SlidePointKind, TapKind, report_loss,
 };
 
 use crate::{
     SusError,
-    syntax::{note_end_position, side_direction, side_lane, standard_parent_code},
+    syntax::{note_end_position, side_direction, side_lane},
 };
 
 pub(super) fn write_with_mode(chart: &Chart, mode: ChartMode) -> Result<String, SusError> {
@@ -59,7 +59,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {
         match output_position(tempo.position(), &timing) {
             Ok((measure, tick)) => {
-                let id = format!("{:02}", index + 1);
+                let id = definition_id(index)?;
                 bpm_definitions.push(format!("#BPM{id}: {}\n", tempo.bpm()));
                 records.push(Record {
                     measure,
@@ -281,7 +281,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
             .collect::<Vec<_>>();
         output.push_str(&format!(
             "#TIL{}: \"{}\"\n",
-            speed_group_text(group),
+            definition_id(group as usize)?,
             definitions.join(",")
         ));
     }
@@ -299,7 +299,9 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
         };
         if record.speed_group != current_speed_group {
             match record.speed_group {
-                Some(group) => output.push_str(&format!("#HISPEED {}\n", speed_group_text(group))),
+                Some(group) => {
+                    output.push_str(&format!("#HISPEED {}\n", definition_id(group as usize)?))
+                }
                 None => output.push_str("#NOSPEED\n"),
             }
             current_speed_group = record.speed_group;
@@ -308,7 +310,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
             if record.attributes.is_empty() {
                 output.push_str("#NOATTRIBUTE\n");
             } else {
-                let id = speed_group_text(attribute_index);
+                let id = definition_id(attribute_index as usize)?;
                 attribute_index = attribute_index
                     .checked_add(1)
                     .ok_or(SusError::UnrepresentablePosition)?;
@@ -327,9 +329,6 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
 fn write_standard(chart: &Chart) -> Result<String, SusError> {
     let timeline = output_timeline(chart);
     let ticks_per_beat = standard_ticks_per_beat(chart)?;
-    let ticks_per_measure = ticks_per_beat
-        .checked_mul(4)
-        .ok_or(SusError::UnrepresentablePosition)?;
     let mut output = format!("#REQUEST \"ticks_per_beat {ticks_per_beat}\"\n");
     if let Some(enabled) = chart.priority_enabled() {
         output.push_str(&format!(
@@ -376,10 +375,16 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
         definitions.sort_by_key(|(measure, tick, _)| (*measure, *tick));
     }
     for (index, tempo) in chart.tempo_changes().iter().enumerate() {
-        let id = format!("{:02}", index + 1);
+        let id = definition_id(index)?;
         output.push_str(&format!("#BPM{id}: {}\n", tempo.bpm()));
         let (measure, tick) = standard_position(tempo.position(), ticks_per_beat, &timeline)?;
-        output.push_str(&format!("#{measure:02X}{tick:03X}: 08{id}\n"));
+        output.push_str(&standard_timing_channel_line(
+            measure,
+            tick,
+            &id,
+            ticks_per_beat,
+            &timeline,
+        )?);
     }
     for (group, definitions) in speed_definitions {
         let definitions = definitions
@@ -388,13 +393,14 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
             .collect::<Vec<_>>();
         output.push_str(&format!(
             "#TIL{}: \"{}\"\n",
-            speed_group_text(group),
+            definition_id(group as usize)?,
             definitions.join(",")
         ));
     }
     let mut current_speed_group = None;
     let mut current_attributes = NoteAttributes::default();
     let mut attribute_index = 0u32;
+    let mut long_note_channels = vec![Vec::<(Position, Position)>::new(); 36];
     for note_id in standard_note_order(chart) {
         let speed_group = chart
             .note_speed_group(note_id)
@@ -413,19 +419,20 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
         };
         if speed_group != current_speed_group {
             if let Some(group) = speed_group {
-                output.push_str(&format!("#HISPEED {}\n", speed_group_text(group)));
+                output.push_str(&format!("#HISPEED {}\n", definition_id(group as usize)?));
             } else if current_speed_group.is_some() {
                 output.push_str("#NOSPEED\n");
             }
             current_speed_group = speed_group;
         }
         let note = &chart.notes()[note_id.value() as usize];
+        let channel = note_channel(note, &mut long_note_channels)?;
         let attributes = note.attributes();
         if attributes != current_attributes {
             if attributes.is_empty() {
                 output.push_str("#NOATTRIBUTE\n");
             } else {
-                let id = speed_group_text(attribute_index);
+                let id = definition_id(attribute_index as usize)?;
                 attribute_index = attribute_index
                     .checked_add(1)
                     .ok_or(SusError::UnrepresentablePosition)?;
@@ -436,14 +443,7 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
             }
             current_attributes = attributes;
         }
-        match write_standard_note(
-            chart,
-            note_id,
-            note,
-            ticks_per_measure,
-            ticks_per_beat,
-            &timeline,
-        ) {
+        match write_standard_note(note, ticks_per_beat, &timeline, channel) {
             Ok(lines) => {
                 for line in lines {
                     output.push_str(&line);
@@ -717,27 +717,46 @@ fn format_attributes(attributes: NoteAttributes) -> String {
 }
 
 fn write_standard_note(
-    chart: &Chart,
-    note_id: NoteId,
     note: &Note,
-    ticks_per_measure: u64,
     ticks_per_beat: u64,
     timeline: &MeasureTimeline,
+    channel: char,
 ) -> Result<Vec<String>, SusError> {
-    let (measure, tick) = standard_position(note.position(), ticks_per_beat, timeline)?;
     let Lane::Slider { start, width } = note.lane() else {
         return Err(SusError::UnsupportedNote {
             note: "side lane in standard SUS".to_owned(),
         });
     };
-    let lane_width = format!("{:02X}{:02X}", start * 2, width * 2);
-    let prefix = format!("#{measure:02X}{tick:03X}");
     let mut lines = Vec::new();
     match note.kind() {
         NoteKind::Tap(kind) => match kind {
-            TapKind::Tap => lines.push(format!("{prefix}: 01{lane_width}")),
-            TapKind::XTap => lines.push(format!("{prefix}: 02{lane_width}")),
-            TapKind::Flick { .. } => lines.push(format!("{prefix}: 03{lane_width}")),
+            TapKind::Tap => lines.push(standard_channel_line(
+                note.position(),
+                '1',
+                start,
+                '1',
+                width,
+                ticks_per_beat,
+                timeline,
+            )?),
+            TapKind::XTap => lines.push(standard_channel_line(
+                note.position(),
+                '1',
+                start,
+                '2',
+                width,
+                ticks_per_beat,
+                timeline,
+            )?),
+            TapKind::Flick { .. } => lines.push(standard_channel_line(
+                note.position(),
+                '1',
+                start,
+                '3',
+                width,
+                ticks_per_beat,
+                timeline,
+            )?),
             TapKind::Tap4 => lines.push(standard_channel_line(
                 note.position(),
                 '1',
@@ -767,98 +786,147 @@ fn write_standard_note(
             )?),
         },
         NoteKind::ExTap { direction } => {
-            if let Ok(direction) = standard_ex_direction(*direction) {
-                lines.push(standard_channel_line(
-                    note.position(),
-                    '5',
-                    start,
-                    direction,
-                    width,
-                    ticks_per_beat,
-                    timeline,
-                )?);
-            } else {
-                lines.push(format!("{prefix}: 02{lane_width}"));
-            }
+            let direction = standard_ex_direction(*direction)?;
+            lines.push(standard_channel_line(
+                note.position(),
+                '5',
+                start,
+                direction,
+                width,
+                ticks_per_beat,
+                timeline,
+            )?);
         }
-        NoteKind::Mine => lines.push(format!("{prefix}: 10{lane_width}")),
-        NoteKind::Hold { end, checkpoints }
-        | NoteKind::ExHold {
-            end, checkpoints, ..
-        } => {
+        NoteKind::Mine => {
+            return Err(SusError::UnsupportedNote {
+                note: "mine in standard SUS".to_owned(),
+            });
+        }
+        NoteKind::Hold { end, checkpoints } => {
             if !checkpoints.is_empty() {
                 report_loss("SUS", "hold checkpoints in standard SUS");
             }
-            let duration = duration_ticks(note.position(), *end, ticks_per_measure)?;
-            lines.push(format!("{prefix}: 05{lane_width}{duration:04X}"));
+            let mut events = vec![(note.position(), '1', start, width)];
+            events.extend(
+                checkpoints
+                    .iter()
+                    .map(|position| (*position, '3', start, width)),
+            );
+            events.push((*end, '2', start, width));
+            for (position, token, lane, width) in events {
+                lines.push(standard_event_channel_line(
+                    StandardChannelEvent {
+                        position,
+                        kind: '2',
+                        lane,
+                        channel,
+                        token,
+                        width,
+                    },
+                    ticks_per_beat,
+                    timeline,
+                )?);
+            }
+        }
+        NoteKind::ExHold {
+            end, checkpoints, ..
+        } => {
+            report_loss("SUS", "extended hold direction in standard SUS");
+            if !checkpoints.is_empty() {
+                report_loss("SUS", "hold checkpoints in standard SUS");
+            }
+            let mut events = vec![(note.position(), '1', start, width)];
+            events.extend(
+                checkpoints
+                    .iter()
+                    .map(|position| (*position, '3', start, width)),
+            );
+            events.push((*end, '2', start, width));
+            for (position, token, lane, width) in events {
+                lines.push(standard_event_channel_line(
+                    StandardChannelEvent {
+                        position,
+                        kind: '2',
+                        lane,
+                        channel,
+                        token,
+                        width,
+                    },
+                    ticks_per_beat,
+                    timeline,
+                )?);
+            }
         }
         NoteKind::Slide { points } | NoteKind::ExSlide { points, .. } => {
-            for segment in points.windows(2) {
-                let start = &segment[0];
-                let end = &segment[1];
+            if matches!(note.kind(), NoteKind::ExSlide { .. }) {
+                report_loss("SUS", "extended slide direction in standard SUS");
+            }
+            for (index, point) in points.iter().enumerate() {
                 let Lane::Slider {
-                    start: start_lane,
-                    width: start_width,
-                } = start.lane()
+                    start: point_lane,
+                    width: point_width,
+                } = point.lane()
                 else {
                     return Err(SusError::UnsupportedNote {
                         note: "side slide lane in standard SUS".to_owned(),
                     });
                 };
-                let Lane::Slider {
-                    start: end_start,
-                    width: end_width,
-                } = end.lane()
-                else {
-                    return Err(SusError::UnsupportedNote {
-                        note: "side slide endpoint in standard SUS".to_owned(),
-                    });
+                let token = if index == 0 {
+                    '1'
+                } else if index + 1 == points.len() {
+                    '2'
+                } else {
+                    match point.kind() {
+                        SlidePointKind::Visible => '3',
+                        SlidePointKind::Control => '4',
+                        SlidePointKind::Invisible => '5',
+                    }
                 };
-                let (segment_measure, segment_tick) =
-                    standard_position(start.position(), ticks_per_beat, timeline)?;
-                let duration = duration_ticks(start.position(), end.position(), ticks_per_measure)?;
-                lines.push(format!(
-                    "#{segment_measure:02X}{segment_tick:03X}: 06{:02X}{:02X}{duration:04X}{:02X}{:02X}",
-                    start_lane * 2,
-                    start_width * 2,
-                    end_start * 2,
-                    end_width * 2,
-                ));
+                lines.push(standard_event_channel_line(
+                    StandardChannelEvent {
+                        position: point.position(),
+                        kind: '3',
+                        lane: point_lane,
+                        channel,
+                        token,
+                        width: point_width,
+                    },
+                    ticks_per_beat,
+                    timeline,
+                )?);
             }
         }
-        NoteKind::Air { properties, parent } => {
-            let code = match properties.direction() {
-                Some(AirDirection::Up) => "07",
-                Some(AirDirection::Down) => "09",
-                _ => {
+        NoteKind::Air { properties, .. } => {
+            if properties.height().is_some() || properties.color() != AirColor::Normal {
+                report_loss("SUS", "AIR height or color");
+            }
+            let direction = match properties.direction() {
+                Some(AirDirection::Up) => '1',
+                Some(AirDirection::Down) => '2',
+                Some(AirDirection::UpperLeft) => '3',
+                Some(AirDirection::UpperRight) => '4',
+                Some(AirDirection::LowerLeft) => '5',
+                Some(AirDirection::LowerRight) => '6',
+                None => {
                     return Err(SusError::UnsupportedNote {
-                        note: "standard SUS AIR direction".to_owned(),
+                        note: "directionless AIR in standard SUS".to_owned(),
                     });
                 }
             };
-            let target =
-                standard_parent_code(chart.note(*parent).map_err(|_| SusError::InvalidValue {
-                    line: 0,
-                    value: format!("invalid AIR parent for note {}", note_id.value()),
-                })?);
-            lines.push(format!("{prefix}: {code}{lane_width}{target}"));
+            lines.push(standard_channel_line(
+                note.position(),
+                '5',
+                start,
+                direction,
+                width,
+                ticks_per_beat,
+                timeline,
+            )?);
         }
-        NoteKind::AirHold {
-            end,
-            checkpoints,
-            parent,
-            ..
-        } => {
-            if !checkpoints.is_empty() {
-                report_loss("SUS", "AIR hold checkpoints in standard SUS");
-            }
-            let duration = duration_ticks(note.position(), *end, ticks_per_measure)?;
-            let target =
-                standard_parent_code(chart.note(*parent).map_err(|_| SusError::InvalidValue {
-                    line: 0,
-                    value: format!("invalid AIR parent for note {}", note_id.value()),
-                })?);
-            lines.push(format!("{prefix}: 08{lane_width}{duration:04X}{target}"));
+        NoteKind::AirHold { .. } => {
+            return Err(SusError::UnsupportedNote {
+                note: "AIR hold notation in standard SUS".to_owned(),
+            });
         }
         NoteKind::AirSlide { .. } | NoteKind::AirCrush { .. } => {
             return Err(SusError::UnsupportedNote {
@@ -879,33 +947,6 @@ fn standard_position(
         .map_err(|_| SusError::UnrepresentablePosition)
 }
 
-fn duration_ticks(start: Position, end: Position, ticks_per_measure: u64) -> Result<u64, SusError> {
-    if end <= start {
-        return Err(SusError::UnrepresentablePosition);
-    }
-    let duration = Position::new(
-        end.numerator()
-            .checked_mul(start.denominator())
-            .and_then(|right| right.checked_sub(start.numerator().checked_mul(end.denominator())?))
-            .ok_or(SusError::UnrepresentablePosition)?,
-        end.denominator()
-            .checked_mul(start.denominator())
-            .ok_or(SusError::UnrepresentablePosition)?,
-    )
-    .map_err(|_| SusError::UnrepresentablePosition)?;
-    let numerator = duration
-        .numerator()
-        .checked_mul(ticks_per_measure / 4)
-        .ok_or(SusError::UnrepresentablePosition)?;
-    if numerator % duration.denominator() != 0 {
-        return Err(SusError::UnrepresentablePosition);
-    }
-    let ticks = numerator / duration.denominator();
-    u16::try_from(ticks)
-        .map(u64::from)
-        .map_err(|_| SusError::UnrepresentablePosition)
-}
-
 fn standard_channel_line(
     position: Position,
     kind: char,
@@ -916,13 +957,10 @@ fn standard_channel_line(
     timeline: &MeasureTimeline,
 ) -> Result<String, SusError> {
     let (measure, tick) = standard_position(position, ticks_per_beat, timeline)?;
-    let tick = usize::try_from(tick).map_err(|_| SusError::UnrepresentablePosition)?;
-    let slots = usize::try_from(
-        timeline
-            .ticks(measure, ticks_per_beat)
-            .map_err(|_| SusError::UnrepresentablePosition)?,
-    )
-    .map_err(|_| SusError::UnrepresentablePosition)?;
+    let slots = timeline
+        .ticks(measure, ticks_per_beat)
+        .map_err(|_| SusError::UnrepresentablePosition)?;
+    let (tick, slots) = compact_data_position(tick, slots)?;
     let trailing = slots
         .checked_sub(tick + 1)
         .ok_or(SusError::UnrepresentablePosition)?;
@@ -934,6 +972,72 @@ fn standard_channel_line(
         base36_digit(width),
         "00".repeat(trailing),
     ))
+}
+
+fn standard_timing_channel_line(
+    measure: u32,
+    tick: u64,
+    definition: &str,
+    ticks_per_beat: u64,
+    timeline: &MeasureTimeline,
+) -> Result<String, SusError> {
+    let slots = timeline
+        .ticks(measure, ticks_per_beat)
+        .map_err(|_| SusError::UnrepresentablePosition)?;
+    let (tick, slots) = compact_data_position(tick, slots)?;
+    let trailing = slots
+        .checked_sub(tick + 1)
+        .ok_or(SusError::UnrepresentablePosition)?;
+    Ok(format!(
+        "#{measure:03}08: {}{definition}{}\n",
+        "00".repeat(tick),
+        "00".repeat(trailing),
+    ))
+}
+
+struct StandardChannelEvent {
+    position: Position,
+    kind: char,
+    lane: u8,
+    channel: char,
+    token: char,
+    width: u8,
+}
+
+fn standard_event_channel_line(
+    event: StandardChannelEvent,
+    ticks_per_beat: u64,
+    timeline: &MeasureTimeline,
+) -> Result<String, SusError> {
+    let (measure, tick) = standard_position(event.position, ticks_per_beat, timeline)?;
+    let slots = timeline
+        .ticks(measure, ticks_per_beat)
+        .map_err(|_| SusError::UnrepresentablePosition)?;
+    let (tick, slots) = compact_data_position(tick, slots)?;
+    let trailing = slots
+        .checked_sub(tick + 1)
+        .ok_or(SusError::UnrepresentablePosition)?;
+    Ok(format!(
+        "#{measure:03}{}{}{}: {}{}{}{}",
+        event.kind,
+        base36_digit(event.lane),
+        event.channel,
+        "00".repeat(tick),
+        event.token,
+        base36_digit(event.width),
+        "00".repeat(trailing),
+    ))
+}
+
+/// Reduces a tick grid to the fewest SUS divisions that preserve the exact position.
+fn compact_data_position(tick: u64, slots: u64) -> Result<(usize, usize), SusError> {
+    if slots == 0 || tick >= slots {
+        return Err(SusError::UnrepresentablePosition);
+    }
+    let divisor = gcd(tick, slots);
+    let tick = usize::try_from(tick / divisor).map_err(|_| SusError::UnrepresentablePosition)?;
+    let slots = usize::try_from(slots / divisor).map_err(|_| SusError::UnrepresentablePosition)?;
+    Ok((tick, slots))
 }
 
 fn standard_ex_direction(direction: ExDirection) -> Result<char, SusError> {
@@ -1083,22 +1187,19 @@ fn add_slide_records(
 }
 
 fn format_record(record: &Record, timing: &XlairTiming<'_>) -> Result<String, SusError> {
-    let padding = usize::try_from(record.tick).map_err(|_| SusError::UnrepresentablePosition)?;
-    let slots = usize::try_from(
-        timing
-            .timeline
-            .ticks(record.measure, timing.ticks_per_beat)
-            .map_err(|_| SusError::UnrepresentablePosition)?,
-    )
-    .map_err(|_| SusError::UnrepresentablePosition)?;
+    let slots = timing
+        .timeline
+        .ticks(record.measure, timing.ticks_per_beat)
+        .map_err(|_| SusError::UnrepresentablePosition)?;
+    let (tick, slots) = compact_data_position(record.tick, slots)?;
     let trailing = slots
-        .checked_sub(padding + 1)
+        .checked_sub(tick + 1)
         .ok_or(SusError::UnrepresentablePosition)?;
     Ok(format!(
         "#{:03}{}: {}{}{}\n",
         record.measure,
         record.key,
-        "00".repeat(padding),
+        "00".repeat(tick),
         record.token,
         "00".repeat(trailing),
     ))
@@ -1194,6 +1295,15 @@ fn speed_group(group: u32) -> Result<u32, SusError> {
     } else {
         Err(SusError::UnrepresentablePosition)
     }
+}
+
+fn definition_id(index: usize) -> Result<String, SusError> {
+    let id = u32::try_from(index)
+        .ok()
+        .and_then(|index| index.checked_add(1))
+        .filter(|id| *id < 36 * 36)
+        .ok_or(SusError::UnrepresentablePosition)?;
+    Ok(speed_group_text(id))
 }
 
 fn speed_group_text(group: u32) -> String {

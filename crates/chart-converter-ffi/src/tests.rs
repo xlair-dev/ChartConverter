@@ -106,7 +106,7 @@ fn exports_stable_timing_order_and_explicit_hold_checkpoints() {
         CcFormat::Sus,
         concat!(
             "#BPM01: 60\n#BPM02: 180\n#00208: 01\n#00008: 02\n",
-            "#TIL00: \"2'0:0.5, 0'0:2.0, 0'0:3.0\"\n#HISPEED 00\n",
+            "#TIL01: \"2'0:0.5, 0'0:2.0, 0'0:3.0\"\n#HISPEED 01\n",
             "#00020A: 14\n#00120A: 34\n#00220A: 24\n",
         )
         .as_bytes(),
