@@ -24,5 +24,24 @@ This is a selective projection of the Rust model. Metadata, note attributes, EX
 directions, AIR heights/colors, and AIR Crush intervals are not exposed. Unsupported
 kinds remain distinguishable. XLAIR-mode omission and reporting follow the Rust parser.
 
-Static consumers must link Rust's native platform dependencies. CMake consumers can
-use Corrosion for target selection and linking.
+Static consumers must link Rust's native platform dependencies. The generated CMake
+package carries the native link dependencies reported by Rust; Corrosion remains an
+option for consumers that build ChartConverter from source.
+
+Tagged releases publish target-specific archives containing the generated header,
+static library, a CMake package, native link dependencies reported by `rustc`, and
+this README. The archive and its `.sha256` sidecar use the same version and Rust
+target triple. The Windows archive targets `x86_64-pc-windows-msvc` and contains a
+`.lib`; the macOS and Linux archives currently target `x86_64` and contain a `.a`.
+Tags must use `v` followed by this crate's version (for example, `v0.1.0`). These
+archives contain the release-profile library and must be used only with the matching
+target. The Linux archive is built on Ubuntu 22.04 and requires a compatible glibc
+runtime. The macOS archive is built with a 13.0 deployment target, matching XLAIR's
+minimum macOS version. The Windows archive uses the statically linked MSVC runtime;
+consumers must use a compatible runtime configuration.
+
+After extracting an archive, add its root directory to `CMAKE_PREFIX_PATH` and use
+`find_package(ChartConverterFFI CONFIG REQUIRED)`. Link the
+`ChartConverter::FFI` target to the C or C++ consumer; the package carries the
+native link dependencies reported by Rust. The `.sha256` sidecar can be used to
+verify a downloaded archive before extracting it.
