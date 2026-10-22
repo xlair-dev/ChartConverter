@@ -92,6 +92,28 @@ int main(void) {
     assert(cc_result_note_details(result, UINT32_MAX) == NULL);
     cc_result_free(result);
 
+    /* SUS handles are already expanded in the same ABI; UGC controls are not. */
+    source = "#00030A:12\n#0003DA:0042\n#00130A:22\n";
+    result = cc_parse(CcFormat_Sus, CcMode_Xlair, (const uint8_t *)source, strlen(source));
+    assert(cc_result_error(result) == NULL);
+    chart = cc_result_chart(result);
+    assert(chart.note_count == 1 && chart.notes[0].point_count == 41);
+    const CcPoint *midpoint = &chart.notes[0].points[20];
+    assert(midpoint->kind == CcPointKind_Control);
+    assert(midpoint->position.numerator == 2 && midpoint->position.denominator == 1);
+    assert(midpoint->lane.start == 6 && midpoint->lane.width == 3);
+    details = cc_result_note_details(result, chart.notes[0].id);
+    assert(details != NULL && details->point_count == 41);
+    cc_result_free(result);
+
+    source = "@ENDHEAD\n#0'0:s02\n#960>cD2\n#1920>s02\n";
+    result = cc_parse(CcFormat_Ugc, CcMode_Xlair, (const uint8_t *)source, strlen(source));
+    assert(cc_result_error(result) == NULL);
+    chart = cc_result_chart(result);
+    assert(chart.note_count == 1 && chart.notes[0].point_count == 3);
+    assert(chart.notes[0].points[1].lane.start == 13);
+    cc_result_free(result);
+
     source = "#00010:44\n#00010:xx\n";
     result = cc_parse(CcFormat_Sus, CcMode_Xlair, (const uint8_t *)source, strlen(source));
     assert(cc_result_error(result) != NULL);

@@ -205,7 +205,7 @@ fn exports_resolved_point_context_without_changing_legacy_paths() {
 #HISPEED 02
 #ATR01:"pr:12"
 #ATTRIBUTE 01
-#00134A:44
+#00134A:34
 #NOSPEED
 #NOATTRIBUTE
 #00238A:24
@@ -227,7 +227,7 @@ fn exports_resolved_point_context_without_changing_legacy_paths() {
     assert!(!points[2].attributes.priority.has_value);
     assert!(matches!(
         unsafe { &*note.points.add(1) }.kind,
-        CcPointKind::Control
+        CcPointKind::Visible
     ));
 }
 
@@ -348,6 +348,99 @@ fn warnings_are_owned_and_isolated_across_threads_and_calls() {
 }
 
 struct Parsed(*mut CcResult);
+
+#[test]
+fn exports_expanded_sus_paths_with_aligned_context_in_both_modes() {
+    let source = br#"#TIL01:"0'0:1"
+#TIL02:"0'0:2"
+#ATR01:"pr:10"
+#HISPEED 01
+#ATTRIBUTE 01
+#00030A:12
+#HISPEED 02
+#NOATTRIBUTE
+#0003DA:0042
+#NOSPEED
+#00130A:22
+"#;
+    for mode in [CcMode::Normal, CcMode::Xlair] {
+        let parsed = Parsed::with_mode(CcFormat::Sus, mode, source);
+        let view = parsed.view();
+        assert_eq!(view.note_count, 1);
+        let note = unsafe { &*view.notes };
+        let details = unsafe { &*cc_result_note_details(parsed.0, note.id) };
+        assert_eq!(note.point_count, 41);
+        assert_eq!(details.point_count, note.point_count);
+        let points = unsafe { slice::from_raw_parts(note.points, note.point_count) };
+        let contexts = unsafe { slice::from_raw_parts(details.points, details.point_count) };
+        assert_eq!(points[20].position.numerator, 2);
+        assert_eq!(points[20].position.denominator, 1);
+        assert_eq!(points[20].lane.start, 6);
+        assert_eq!(points[20].lane.width, 3);
+        assert!(
+            points[1..40]
+                .iter()
+                .all(|point| matches!(point.kind, CcPointKind::Control))
+        );
+        for context in &contexts[..40] {
+            assert_eq!(context.speed_group, 0);
+            assert!(context.attributes.priority.has_value);
+            assert_eq!(context.attributes.priority.value, 10);
+        }
+        assert_eq!(contexts[40].speed_group, -1);
+        assert!(!contexts[40].attributes.priority.has_value);
+        assert_eq!(unsafe { cc_result_diagnostics(parsed.0) }.count, 0);
+    }
+}
+
+#[test]
+fn exports_the_same_curve_at_low_and_high_source_resolutions() {
+    for resolution in [1, 480, 960] {
+        for mode in [CcMode::Normal, CcMode::Xlair] {
+            let source = format!(
+                "#REQUEST \"ticks_per_beat {resolution}\"\n#00030A:12\n#0003DA:0042\n#00130A:22\n"
+            );
+            let parsed = Parsed::with_mode(CcFormat::Sus, mode, source.as_bytes());
+            let view = parsed.view();
+            assert_eq!(view.note_count, 1);
+            let note = unsafe { &*view.notes };
+            assert_eq!(note.point_count, 41);
+            for index in [10, 30] {
+                let point = unsafe { &*note.points.add(index) };
+                assert_eq!(point.position.numerator, if index == 10 { 1 } else { 3 });
+                assert_eq!(point.position.denominator, 1);
+                assert_eq!(point.lane.start, 4);
+                assert_eq!(point.lane.width, 3);
+            }
+            assert_eq!(unsafe { cc_result_diagnostics(parsed.0) }.count, 0);
+        }
+    }
+}
+
+#[test]
+fn leaves_ugc_control_points_authored_and_exposes_curve_limits_as_errors() {
+    let parsed = Parsed::new(CcFormat::Ugc, b"@ENDHEAD\n#0'0:s02\n#960>cD2\n#1920>s02\n");
+    let note = unsafe { &*parsed.view().notes };
+    assert_eq!(note.point_count, 3);
+    let middle = unsafe { &*note.points.add(1) };
+    assert!(matches!(middle.kind, CcPointKind::Control));
+    assert_eq!(middle.lane.start, 13);
+    assert_eq!(middle.lane.width, 2);
+
+    let invalid = Parsed::new(
+        CcFormat::Sus,
+        b"#BPM01:0.000001\n#00008:01\n#00030A:12\n#0003DA:0042\n#00130A:22\n",
+    );
+    assert!(!unsafe { cc_result_error(invalid.0) }.is_null());
+    assert_eq!(unsafe { cc_result_chart(invalid.0) }.note_count, 0);
+    let diagnostics = unsafe { cc_result_diagnostics(invalid.0) };
+    assert_eq!(diagnostics.count, 1);
+    assert!(matches!(
+        unsafe { &*diagnostics.diagnostics }.severity,
+        CcDiagnosticSeverity::Error
+    ));
+    assert_eq!(unsafe { &*diagnostics.diagnostics }.line, 5);
+}
 
 impl Parsed {
     fn new(format: CcFormat, source: &[u8]) -> Self {

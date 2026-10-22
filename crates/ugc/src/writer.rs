@@ -643,10 +643,7 @@ fn write_air_note(note: &Note, prefix: &str) -> Result<String, UgcError> {
 fn encode_slide_point_marker(kind: &SlidePointKind) -> Result<char, UgcError> {
     match kind {
         SlidePointKind::Visible => Ok('s'),
-        SlidePointKind::Control => Ok('c'),
-        SlidePointKind::Invisible => Err(UgcError::UnsupportedNote {
-            note: "invisible slide point".to_owned(),
-        }),
+        SlidePointKind::Control | SlidePointKind::Invisible => Ok('c'),
     }
 }
 

@@ -1,5 +1,8 @@
 //! Format-independent conversion entry points for supported chart formats.
 
+#[cfg(test)]
+mod path_tests;
+
 use std::fmt;
 
 use chart::{Chart, ChartMode, ParseReport};

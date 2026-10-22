@@ -251,8 +251,12 @@ impl AirProperties {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SlidePointKind {
+    /// On-path anchor with a visible checkpoint.
     Visible,
+    /// On-path control without a visible checkpoint (UGC c / C2S SLC).
+    /// SUS Bezier handles are expanded before entering the shared IR.
     Control,
+    /// On-path invisible anchor, retained from SUS token 5.
     Invisible,
 }
 
