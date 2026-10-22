@@ -50,6 +50,41 @@ fn reads_header_timing_before_resolving_bpm_and_speed_positions() {
 }
 
 #[test]
+fn accepts_click_notes_without_lanes() {
+    let chart = parse("@ENDHEAD\n#0'0:c\n#0'480:t04\n").expect("CLICK does not have lane fields");
+    assert_eq!(chart.notes().len(), 1);
+    assert_eq!(chart.notes()[0].position(), Position::new(1, 1).unwrap());
+}
+
+#[test]
+fn skips_unsupported_long_notes_with_comments_and_directives() {
+    for kind in ["H04N", "S0400N", "C04000,480", "T0400"] {
+        let source = format!(
+            "@ENDHEAD\n#0'0:t04\n#0'0:{kind}\n'comment\n\n@USETIL\t2\n#480>s04\n'comment\n#960>s04\n#1'0:t84\n"
+        );
+        let chart = super::parse_with_mode(&source, chart::ChartMode::Xlair)
+            .expect("omitted long notes still consume their whole follower block");
+        assert_eq!(chart.notes().len(), 2);
+        assert_eq!(chart.notes()[1].lane(), Lane::slider(8, 4).unwrap());
+        assert_eq!(
+            chart.note_speed_group(chart::NoteId::new(1)).unwrap(),
+            Some(2)
+        );
+    }
+}
+
+#[test]
+fn preserves_audio_offsets_and_rejects_non_finite_values() {
+    for offset in [-0.5, 0.0, 1.25] {
+        let chart = parse(&format!("@BGMOFS\t{offset}\n@ENDHEAD\n")).expect("finite audio offset");
+        assert_eq!(chart.audio_offset_seconds(), Some(offset));
+    }
+    for invalid in ["NaN", "inf", "-inf"] {
+        assert!(parse(&format!("@BGMOFS\t{invalid}\n@ENDHEAD\n")).is_err());
+    }
+}
+
+#[test]
 fn keeps_nonzero_ticks_and_soffset_consistent_in_variable_meters() {
     let chart = parse("@FLAG\tSOFFSET\tTRUE\n@BEAT\t0\t3\t4\n@ENDHEAD\n#0'480:t04\n")
         .expect("SOFFSET shifts the correctly resolved beat position");

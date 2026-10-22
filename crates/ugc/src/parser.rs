@@ -196,6 +196,13 @@ impl Parser {
                     .set_base_bpm(bpm)
                     .map_err(|source| UgcError::Chart { line, source })?;
             }
+            "@BGMOFS" => {
+                // Like SUS WAVEOFFSET, positive values delay audio relative to the chart.
+                let seconds = parse_speed(line, value)?;
+                self.chart
+                    .set_audio_offset_seconds(seconds)
+                    .map_err(|source| UgcError::Chart { line, source })?;
+            }
             "@FLAG" => self.parse_flag(line, value)?,
             "@SPDDEF" | "@SPDFLD" => {
                 return Err(UgcError::UnsupportedRecord {
@@ -347,6 +354,9 @@ impl Parser {
             .strip_prefix('#')
             .ok_or(UgcError::MalformedRecord { line })?;
         let (measure, tick) = parse_measure_tick(line, position_text)?;
+        if code == "c" {
+            return Ok((0, None));
+        }
         if code.len() < 3 {
             return Err(UgcError::MalformedRecord { line });
         }
@@ -390,10 +400,7 @@ impl Parser {
             'C' => self.parse_air_crush(line, position, &code[1..3], &code[3..], following),
             'T' => {
                 report_loss("UGC", "unsupported legacy T note was omitted");
-                let consumed = following
-                    .iter()
-                    .take_while(|follower| parse_follower(follower.trim()).is_some())
-                    .count();
+                let consumed = self.skip_followers(line, following)?;
                 Ok((consumed, None))
             }
             'c' => Ok((0, None)),
@@ -498,10 +505,7 @@ impl Parser {
     ) -> Result<(usize, Option<Note>), UgcError> {
         if self.mode == ChartMode::Xlair {
             report_loss("UGC", "AIR Crush notation in XLAIR mode");
-            let consumed = following
-                .iter()
-                .take_while(|follower| parse_follower(follower.trim()).is_some())
-                .count();
+            let consumed = self.skip_followers(line, following)?;
             return Ok((consumed, None));
         }
         let parent = self.last_parent.ok_or(UgcError::InvalidValue {
@@ -542,6 +546,10 @@ impl Parser {
         let mut consumed = 0;
         for follower in following {
             let follower = follower.trim();
+            if follower.is_empty() || follower.starts_with('\'') {
+                consumed += 1;
+                continue;
+            }
             if follower.starts_with('@') {
                 self.parse_directive(line + consumed + 1, follower)?;
                 consumed += 1;
@@ -639,10 +647,7 @@ impl Parser {
     ) -> Result<(usize, Option<Note>), UgcError> {
         if self.mode == ChartMode::Xlair {
             report_loss("UGC", "AIR long notation in XLAIR mode");
-            let consumed = following
-                .iter()
-                .take_while(|follower| parse_follower(follower.trim()).is_some())
-                .count();
+            let consumed = self.skip_followers(line, following)?;
             return Ok((consumed, None));
         }
         let parent = self.last_parent.ok_or(UgcError::InvalidValue {
@@ -831,6 +836,21 @@ impl Parser {
             note: Some(note),
             air_points,
         })
+    }
+
+    fn skip_followers(&mut self, line: usize, following: &[&str]) -> Result<usize, UgcError> {
+        for (index, text) in following.iter().enumerate() {
+            let text = text.trim();
+            if text.is_empty() || text.starts_with('\'') {
+                continue;
+            }
+            if text.starts_with('@') {
+                self.parse_directive(line + index + 1, text)?;
+            } else if parse_follower(text).is_none() {
+                return Ok(index);
+            }
+        }
+        Ok(following.len())
     }
 
     fn position(&self, line: usize, measure: u32, tick: u64) -> Result<Position, UgcError> {
