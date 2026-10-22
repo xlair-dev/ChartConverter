@@ -65,7 +65,7 @@ impl Parser {
                 "FLK" => self.parse_tap(line, &fields, TapKind::Flick { direction: None })?,
                 "MNE" => self.parse_mine(line, &fields)?,
                 "CHR" => self.parse_ex_tap(line, &fields)?,
-                "AIR" => self.parse_air(line, &fields)?,
+                "AIR" | "AUL" | "AUR" | "ADW" | "ADL" | "ADR" => self.parse_air(line, &fields)?,
                 "HLD" => self.parse_hold(line, &fields, None)?,
                 "HXD" => self.parse_hold(line, &fields, Some(6))?,
                 "SLD" | "SLC" => self.parse_slide(line, &fields, None)?,

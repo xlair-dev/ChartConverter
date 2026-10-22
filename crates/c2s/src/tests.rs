@@ -6,6 +6,28 @@ use chart::{
 use super::{parse, write};
 
 #[test]
+fn parses_all_air_direction_record_names() {
+    for (record, direction) in [
+        ("AIR", chart::AirDirection::Up),
+        ("AUL", chart::AirDirection::UpperLeft),
+        ("AUR", chart::AirDirection::UpperRight),
+        ("ADW", chart::AirDirection::Down),
+        ("ADL", chart::AirDirection::LowerLeft),
+        ("ADR", chart::AirDirection::LowerRight),
+    ] {
+        let source = format!("RESOLUTION\t384\nTAP\t0\t0\t0\t4\n{record}\t0\t0\t0\t4\tTAP\tDEF\n");
+        let chart = parse(&source).expect("valid AIR direction");
+        assert_eq!(chart.notes().len(), 2);
+        assert!(
+            matches!(chart.notes()[1].kind(), NoteKind::Air { properties, parent } if properties.direction() == Some(direction) && *parent == chart::NoteId::new(0))
+        );
+        let xlair = super::parse_with_mode(&source, chart::ChartMode::Xlair)
+            .expect("AIR is omitted in XLAIR mode");
+        assert_eq!(xlair.notes().len(), 1);
+    }
+}
+
+#[test]
 fn parses_timing_taps_holds_and_slides() {
     let source = "RESOLUTION\t384\nBPM\t0\t0\t120.000\nMET\t1\t0\t3\t4\nTAP\t0\t96\t4\t2\nHLD\t0\t192\t8\t4\t192\nSLD\t1\t0\t0\t4\t384\t8\t4\n";
     let chart = parse(source).expect("valid C2S");
