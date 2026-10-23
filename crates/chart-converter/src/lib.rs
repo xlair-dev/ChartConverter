@@ -20,6 +20,38 @@ pub enum Format {
 }
 
 impl Format {
+    /// Detects a chart format from its contents.
+    ///
+    /// The detection uses format-specific structural markers without requiring
+    /// the document to be fully supported by a parser. It returns `None` when
+    /// no supported format can be identified.
+    pub fn detect(source: &[u8]) -> Option<Self> {
+        let source = decode_source(source).ok()?;
+        let lines: Vec<_> = source.lines().map(str::trim).collect();
+
+        if lines.contains(&"@ENDHEAD") {
+            return Some(Self::Ugc);
+        }
+
+        if lines.iter().any(|line| {
+            line.split_once('\t').is_some_and(|(header, value)| {
+                header == "RESOLUTION"
+                    && value
+                        .trim()
+                        .parse::<u64>()
+                        .is_ok_and(|resolution| resolution > 0)
+            })
+        }) {
+            return Some(Self::C2s);
+        }
+
+        if has_sus_marker(&lines) {
+            return Some(Self::Sus);
+        }
+
+        None
+    }
+
     /// Identifies a format from a file extension, with or without a leading dot.
     pub fn from_extension(extension: &str) -> Option<Self> {
         let extension = extension.strip_prefix('.').unwrap_or(extension);
@@ -42,6 +74,38 @@ impl Format {
             Self::Ugc => "ugc",
         }
     }
+}
+
+fn has_sus_marker(lines: &[&str]) -> bool {
+    lines.iter().any(|line| {
+        let Some(command) = line.strip_prefix('#') else {
+            return false;
+        };
+        let header = command
+            .split_once(':')
+            .map_or(command, |(header, _)| header)
+            .trim();
+
+        (header.len() == 5
+            && header
+                .chars()
+                .all(|character| character.is_ascii_hexdigit()))
+            || [
+                "BASEBPM",
+                "BPM",
+                "TIL",
+                "ATR",
+                "ATTRIBUTE",
+                "NOATTRIBUTE",
+                "REQUEST",
+                "NOSPEED",
+                "HISPEED",
+                "MEASUREBS",
+                "MEASUREHS",
+            ]
+            .iter()
+            .any(|marker| header.starts_with(marker))
+    })
 }
 
 impl fmt::Display for Format {
