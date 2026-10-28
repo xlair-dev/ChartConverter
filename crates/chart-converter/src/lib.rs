@@ -446,6 +446,51 @@ mod tests {
     }
 
     #[test]
+    fn converts_measure_speed_groups_between_sus_and_ugc_without_loss() {
+        let source = r#"#TIL01: "0'0:0.5"
+#TIL02: "0'0:2"
+#MEASUREHS 01
+#HISPEED 02
+#00010:14
+"#;
+        for mode in [ChartMode::Normal, ChartMode::Xlair] {
+            let expected = sus::parse_with_mode(source, mode).unwrap();
+            let ugc =
+                super::convert_with_modes(Format::Sus, mode, Format::Ugc, mode, source).unwrap();
+            assert!(ugc.contains("@MAINTIL\t0\n"));
+            let restored_ugc = ugc::parse_with_mode(&ugc, mode).unwrap();
+            assert_eq!(restored_ugc.main_speed_group(), expected.main_speed_group());
+            assert_eq!(
+                restored_ugc.scroll_speed_changes(),
+                expected.scroll_speed_changes()
+            );
+            assert_eq!(
+                restored_ugc
+                    .note_speed_group(chart::NoteId::new(0))
+                    .unwrap(),
+                Some(1)
+            );
+
+            let sus =
+                super::convert_with_modes(Format::Ugc, mode, Format::Sus, mode, &ugc).unwrap();
+            assert!(sus.contains("#MEASUREHS 01\n"));
+            let restored_sus = sus::parse_with_mode(&sus, mode).unwrap();
+            assert_eq!(restored_sus.main_speed_group(), expected.main_speed_group());
+            assert_eq!(
+                restored_sus.scroll_speed_changes(),
+                expected.scroll_speed_changes()
+            );
+            assert_eq!(restored_sus.notes(), expected.notes());
+            assert_eq!(
+                restored_sus
+                    .note_speed_group(chart::NoteId::new(0))
+                    .unwrap(),
+                Some(1)
+            );
+        }
+    }
+
+    #[test]
     fn parses_bom_marked_utf16_c2s() {
         let source = "RESOLUTION\t384\nTAP\t0\t0\t0\t4\n";
         let mut bytes = vec![0xff, 0xfe];
