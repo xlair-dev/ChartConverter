@@ -224,12 +224,12 @@ impl Parser {
                 continue;
             }
             if command.starts_with("MEASUREHS") {
-                // The IR has no barline rendering state, so this display-only command is ignored.
                 let value = command
                     .split_whitespace()
                     .nth(1)
                     .ok_or(SusError::MalformedCommand { line })?;
-                self.parse_speed_group(line, value)?;
+                let group = self.parse_speed_group(line, value)?;
+                self.chart.set_main_speed_group(group);
                 continue;
             }
             if command.starts_with("ATR") {
