@@ -59,6 +59,7 @@ fn exposes_sus_zero_timeline_as_a_distinct_group_in_notes_and_points() {
         assert_eq!(view.note_count, 1);
         let note = unsafe { &*view.notes };
         assert_eq!(note.speed_group, 1);
+        assert_eq!(unsafe { cc_result_metadata(parsed.0) }.main_speed_group, 1);
         let details = unsafe { &*cc_result_note_details(parsed.0, note.id) };
         assert_eq!(details.point_count, note.point_count);
         let points = unsafe { slice::from_raw_parts(details.points, details.point_count) };
@@ -239,6 +240,24 @@ fn exposes_ugc_zero_group_and_base_timeline() {
     );
     assert_eq!(unsafe { cc_result_metadata(parsed.0) }.main_speed_group, 2);
     assert_eq!(unsafe { &*parsed.view().notes }.speed_group, 0);
+}
+
+#[test]
+fn exposes_sus_measurehs_without_changing_note_context() {
+    let source = br#"#TIL01: "0'0:0.5"
+#TIL02: "0'0:2"
+#HISPEED 02
+#MEASUREHS 01
+#00010:14
+"#;
+    for mode in [CcMode::Normal, CcMode::Xlair] {
+        let parsed = Parsed::with_mode(CcFormat::Sus, mode, source);
+        let view = parsed.view();
+        assert_eq!(view.note_count, 1);
+        assert_eq!(unsafe { cc_result_metadata(parsed.0) }.main_speed_group, 0);
+        assert_eq!(unsafe { &*view.notes }.speed_group, 1);
+        assert_eq!(unsafe { cc_result_diagnostics(parsed.0) }.count, 0);
+    }
 }
 
 #[test]
