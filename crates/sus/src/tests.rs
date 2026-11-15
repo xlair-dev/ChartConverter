@@ -702,6 +702,7 @@ fn parses_ched_zero_timeline_without_warnings() {
             let chart = report.result.expect("Ched timeline 00 is accepted");
             assert_eq!(chart.note_speed_group(NoteId::new(0)).unwrap(), Some(0));
             assert_eq!(chart.note_speed_group(NoteId::new(1)).unwrap(), None);
+            assert_eq!(chart.main_speed_group(), Some(0));
             // 00 still denotes an empty BPM slot, not BPM definition zero.
             assert_eq!(chart.tempo_changes().len(), 1);
             assert_eq!(
@@ -761,6 +762,7 @@ fn reserves_nonzero_ids_even_for_unreferenced_empty_timelines() {
     for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
         let chart = parse_with_mode(source, mode).unwrap();
         assert_eq!(chart.note_speed_group(NoteId::new(0)).unwrap(), Some(2));
+        assert_eq!(chart.main_speed_group(), Some(1));
         assert_eq!(
             chart.scroll_speed_changes()[0].scope(),
             ScrollScope::Group(2)
@@ -799,6 +801,7 @@ fn round_trips_zero_timeline_point_context_using_nonzero_ids() {
         assert!(!output.contains("#HISPEED 00"));
         let restored = parse_with_mode(&output, mode).unwrap();
         assert_eq!(restored.notes(), chart.notes());
+        assert_eq!(restored.main_speed_group(), chart.main_speed_group());
         // The writer groups definitions by ID; order across different groups is not semantic.
         for group in [0, 1, 1294] {
             let changes = |chart: &Chart| {
@@ -883,12 +886,98 @@ fn still_rejects_zero_as_an_attribute_id() {
 }
 
 #[test]
-fn ignores_measure_line_speed_commands() {
+fn preserves_measure_line_speed_commands() {
     let chart = parse("#MEASUREHS 01\n#REQUEST \"enable_priority true\"\n#00110: 14")
         .expect("valid SUS display commands");
     assert_eq!(chart.notes().len(), 1);
     assert_eq!(chart.priority_enabled(), Some(true));
+    assert_eq!(chart.main_speed_group(), Some(0));
     assert!(write(&chart).unwrap().contains("enable_priority true"));
+    assert!(write(&chart).unwrap().contains("#MEASUREHS 01\n"));
+}
+
+#[test]
+fn measurehs_is_independent_of_hispeed_and_nospeed_in_both_modes() {
+    let source = r#"#TIL01: "0'0:0.5"
+#TIL02: "0'0:2"
+#HISPEED 02
+#MEASUREHS 01
+#00010:14
+#NOSPEED
+#00110:14
+"#;
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        let chart = parse_with_mode(source, mode).unwrap();
+        assert_eq!(chart.main_speed_group(), Some(0));
+        assert_eq!(chart.note_speed_group(NoteId::new(0)).unwrap(), Some(1));
+        assert_eq!(chart.note_speed_group(NoteId::new(1)).unwrap(), None);
+        let output = write_with_mode(&chart, mode).unwrap();
+        assert!(output.contains("#MEASUREHS 01\n"));
+        let restored = parse_with_mode(&output, mode).unwrap();
+        assert_eq!(restored.main_speed_group(), chart.main_speed_group());
+        assert_eq!(restored.notes(), chart.notes());
+        assert_eq!(
+            restored.scroll_speed_changes(),
+            chart.scroll_speed_changes()
+        );
+        for id in [NoteId::new(0), NoteId::new(1)] {
+            assert_eq!(
+                restored.note_speed_group(id).unwrap(),
+                chart.note_speed_group(id).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn the_last_measurehs_selects_the_document_main_group_case_insensitively() {
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        let chart = parse_with_mode("#MEASUREHS 01\n#measurehs zZ\n#00110:14\n", mode).unwrap();
+        assert_eq!(chart.main_speed_group(), Some(1294));
+        assert_eq!(chart.note_speed_group(NoteId::new(0)).unwrap(), None);
+        let output = write_with_mode(&chart, mode).unwrap();
+        assert!(output.contains("#MEASUREHS zz\n"));
+        assert_eq!(
+            parse_with_mode(&output, mode).unwrap().main_speed_group(),
+            Some(1294)
+        );
+    }
+}
+
+#[test]
+fn measurehs_survives_without_notes_or_speed_definitions() {
+    let mut chart = Chart::new();
+    chart.set_main_speed_group(7);
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        let output = write_with_mode(&chart, mode).unwrap();
+        assert!(output.contains("#MEASUREHS 08\n"));
+        let restored = parse_with_mode(&output, mode).unwrap();
+        assert_eq!(restored.main_speed_group(), Some(7));
+        assert!(restored.notes().is_empty());
+        assert!(restored.scroll_speed_changes().is_empty());
+    }
+}
+
+#[test]
+fn absent_measurehs_does_not_inherit_the_note_group() {
+    let chart = parse("#HISPEED 01\n#00110:14\n").unwrap();
+    assert_eq!(chart.main_speed_group(), None);
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        assert!(
+            !write_with_mode(&chart, mode)
+                .unwrap()
+                .contains("#MEASUREHS")
+        );
+    }
+}
+
+#[test]
+fn an_unrepresentable_measure_group_is_not_silently_omitted() {
+    let mut chart = Chart::new();
+    chart.set_main_speed_group(1295);
+    for mode in [chart::ChartMode::Normal, chart::ChartMode::Xlair] {
+        assert!(write_with_mode(&chart, mode).is_err());
+    }
 }
 
 #[test]

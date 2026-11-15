@@ -316,6 +316,7 @@ fn write_xlair(chart: &Chart) -> Result<String, SusError> {
             definitions.join(",")
         ));
     }
+    write_measure_speed_group(&mut output, chart)?;
     let mut context = ContextWriter::default();
     for record in records {
         let text = match format_record(&record, &timing) {
@@ -403,6 +404,7 @@ fn write_standard(chart: &Chart) -> Result<String, SusError> {
             definitions.join(",")
         ));
     }
+    write_measure_speed_group(&mut output, chart)?;
     let mut context = ContextWriter::default();
     let mut long_note_channels = vec![Vec::<(Position, Position)>::new(); 36];
     for note_id in standard_note_order(chart) {
@@ -479,6 +481,13 @@ impl ContextWriter {
         }
         Ok(())
     }
+}
+
+fn write_measure_speed_group(output: &mut String, chart: &Chart) -> Result<(), SusError> {
+    if let Some(group) = chart.main_speed_group() {
+        output.push_str(&format!("#MEASUREHS {}\n", definition_id(group as usize)?));
+    }
+    Ok(())
 }
 
 fn output_speed_group(chart: &Chart, group: Option<u32>) -> Result<Option<u32>, SusError> {
